@@ -1,0 +1,17 @@
+{
+  "name": "traverse-notebooks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "concurrently -k -n tsc,quarto -c blue,green \"tsc --watch --preserveWatchOutput\" \"quarto preview traverse.qmd\"",
+    "render": "quarto render",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "npm run typecheck && node --test \"tests/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "concurrently": "^10.0.5",
+    "typescript": "^7.0.2"
+  }
+}

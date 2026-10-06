@@ -1,0 +1,10 @@
+[project]
+name = "traverse-notebooks"
+version = "0.1.0"
+description = "Land surveying traverse notebooks rendered with Quarto"
+requires-python = ">=3.14"
+dependencies = [
+    "jupyter",
+    "matplotlib",
+    "pyyaml",
+]

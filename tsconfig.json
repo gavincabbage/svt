@@ -1,0 +1,24 @@
+{
+  // Builds src/*.ts into js/*.js for the Quarto page to import.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rootDir": "src",
+    "outDir": "js",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    // Only syntax Node can run by stripping types (tests run the .ts directly)
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    // Lets src files import each other as "./x.ts" and still emit "./x.js"
+    "rewriteRelativeImportExtensions": true,
+    "inlineSourceMap": true,
+    "inlineSources": true
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,11 @@
+{
+  // Type-checks the library and the tests together; emits nothing (Node runs the tests' .ts directly).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["src", "tests"]
+}

@@ -1,0 +1,21 @@
+# Node
+node_modules/
+
+# TypeScript build output (src/*.ts -> js/*.js, rebuilt by `npm run build` / Quarto pre-render)
+js/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Quarto
+.quarto/
+/*.html
+/*_files/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

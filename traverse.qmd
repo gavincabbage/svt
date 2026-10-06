@@ -1,0 +1,724 @@
+---
+title: "Traverse Error Propagation"
+format:
+  html:
+    toc: true
+    code-fold: true
+jupyter: python3
+bibliography: references.bib
+---
+
+Use this page to model error propagation within a closed traverse with an arbitrary number of legs.
+
+This page currently models propagation of each leg of the traverse independently. It does not carry
+forward errors from leg to leg from any control points.
+
+# Field Data
+
+```{python}
+#| code-summary: "Load default data"
+import csv
+
+# Column names repeat ("Minutes", "Seconds"), so look columns up by first occurrence.
+with open("traverse.csv", newline="") as f:
+    reader = csv.reader(f)
+    header = next(reader)
+    rows = [r for r in reader if r]
+
+col = {name: i for i, name in reversed(list(enumerate(header)))}
+
+def dms_from(row, deg_col):
+    i = col[deg_col]  # minutes and seconds follow the degrees column
+    return {"deg": float(row[i]), "min": float(row[i + 1]), "sec": float(row[i + 2])}
+
+traverse_rows = [
+    {
+        "station": row[col["Station"]],
+        **dms_from(row, "Angle Degrees"),
+        "dist": float(row[col["Foresight Distance"]]),
+    }
+    for row in rows
+]
+start_azimuth = dms_from(rows[0], "Forward Azimuth Degrees")
+
+ojs_define(csvRows=traverse_rows, csvStartAz=start_azimuth)
+```
+
+Edit the interior angles (turned to the right), foresight distances, or initial azimuth.
+
+Subsequent azimuths, station positions, and closure update as you type.
+
+```{ojs}
+//| echo: false
+viewof traverse = traverseEditor({
+  startAz: csvStartAz,
+  rows: csvRows
+})
+```
+
+```{ojs}
+//| echo: false
+html`<div class="closure-stats">
+  ${stat("Angular misclosure", fmtSigned(result.angularError), `Σ angles ${formatDms(result.angleSum)} vs ${(result.n - 2) * 180}°`)}
+  ${stat("Linear misclosure (unbalanced)", result.misclosure.toFixed(3), `ΔN ${signed(result.errN)} · ΔE ${signed(result.errE)}`)}
+</div>`
+```
+
+```{ojs}
+//| echo: false
+traversePlot(result, Math.min(width, 760))
+```
+
+```{ojs}
+//| echo: false
+html`<table class="lines-table">
+  <thead><tr>
+    <th>Line</th><th class="num">Interior angle. </th><th class="num">Azimuth</th>
+    <th class="num">Distance</th><th class="num">Latitude</th><th class="num">Departure</th>
+  </tr></thead>
+  <tbody>${result.lines.map(l => html`<tr>
+    <td>${l.from} → ${l.to}</td><td class="num">${formatDms(l.angle)}</td><td class="num">${formatAzimuth(l.azimuth)}</td>
+    <td class="num">${l.dist.toFixed(2)}</td><td class="num">${l.lat.toFixed(3)}</td><td class="num">${l.dep.toFixed(3)}</td>
+  </tr>`)}</tbody>
+</table>`
+```
+
+```{ojs}
+//| echo: false
+// ---- Computation -----------------------------------------------------------
+// The math lives in src/traverse.ts (tested with `npm test`), compiled to js/traverse.js.
+
+import {analyzeTraverse, closeTraverse, parseTraverse, formatDms, formatAzimuth} from "./js/traverse.js"
+import {parseInstrument, ANGLE_UNITS, LENGTH_UNITS} from "./js/instrument.js"
+import {distanceErrors, readingPointingError, centeringErrors, lineErrors} from "./js/errors.js"
+```
+
+```{ojs}
+//| echo: false
+trav = parseTraverse(traverse)
+result = analyzeTraverse(trav)
+spec = parseInstrument(instrument)
+distErrors = distanceErrors(trav, spec)
+rpError = readingPointingError(spec)
+centErrors = centeringErrors(trav, spec)
+lineErrs = lineErrors(trav, spec)
+
+fmtSigned = a => (a >= 0 ? "+" : "") + formatDms(a)
+signed = v => (Math.round(v * 1000) >= 0 ? "+" : "−") + Math.abs(v).toFixed(3)  // no "−0.000"
+```
+
+```{ojs}
+//| echo: false
+// ---- Diagram ---------------------------------------------------------------
+
+function traversePlot(res, w) {
+  const h = Math.round(w * 0.85);
+  const margin = {top: 30, right: 30, bottom: 45, left: 70};
+  const innerW = w - margin.left - margin.right, innerH = h - margin.top - margin.bottom;
+
+  // Equal scale on both axes: pick one units-per-pixel for the larger extent, with padding.
+  const Ns = res.points.map(p => p.N), Es = res.points.map(p => p.E);
+  const [minN, maxN, minE, maxE] = [Math.min(...Ns), Math.max(...Ns), Math.min(...Es), Math.max(...Es)];
+  const upp = Math.max((maxE - minE) / innerW, (maxN - minN) / innerH, 1e-9) * 1.35;
+  const cE = (minE + maxE) / 2, cN = (minN + maxN) / 2;
+  const xDomain = [cE - upp * innerW / 2, cE + upp * innerW / 2];
+  const yDomain = [cN - upp * innerH / 2, cN + upp * innerH / 2];
+  const span = upp * Math.min(innerW, innerH);
+
+  // Station labels pushed outward from the centroid
+  const stations = res.points.slice(0, res.n);
+  const gN = stations.reduce((s, p) => s + p.N, 0) / res.n;
+  const gE = stations.reduce((s, p) => s + p.E, 0) / res.n;
+  const stationLabels = stations.map((p, i) => {
+    const dN = p.N - gN, dE = p.E - gE, r = Math.hypot(dN, dE) || 1;
+    return {...p, LN: p.N + 0.07 * span * dN / r, LE: p.E + 0.07 * span * dE / r,
+            text: `${p.station}\n${formatDms(res.angles[i])}`};
+  });
+
+  // Line labels at midpoints, rotated along the line and kept upright
+  const lineLabels = res.lines.map((c, i) => {
+    const a = res.points[i], b = res.points[i + 1];
+    let rot = -Math.atan2(b.N - a.N, b.E - a.E) * 180 / Math.PI;
+    if (rot > 90) rot -= 180;
+    if (rot < -90) rot += 180;
+    return {N: (a.N + b.N) / 2, E: (a.E + b.E) / 2, rot,
+            text: `Az ${formatAzimuth(c.azimuth)}\n${c.dist.toFixed(2)}`};
+  });
+
+  const end = res.points[res.n], start = res.points[0];
+  const arrowE = xDomain[1] - 0.06 * span, arrowN = yDomain[1] - 0.04 * span;
+
+  return Plot.plot({
+    width: w, height: h,
+    marginTop: margin.top, marginRight: margin.right, marginBottom: margin.bottom, marginLeft: margin.left,
+    x: {domain: xDomain, label: "Easting", grid: true},
+    y: {domain: yDomain, label: "Northing", grid: true},
+    marks: [
+      Plot.line(res.points, {x: "E", y: "N", stroke: "steelblue", strokeWidth: 2}),
+      Plot.link([{start, end}], {x1: d => d.end.E, y1: d => d.end.N, x2: d => d.start.E, y2: d => d.start.N,
+                                 stroke: "crimson", strokeDasharray: "4,3", strokeWidth: 2}),
+      Plot.dot(stations, {x: "E", y: "N", r: 5, fill: "crimson",
+                          title: p => `Station ${p.station}\nN ${p.N.toFixed(3)}\nE ${p.E.toFixed(3)}`}),
+      Plot.text(stationLabels, {x: "LE", y: "LN", text: "text", fontWeight: "bold", fontSize: 12, lineAnchor: "middle"}),
+      Plot.text(lineLabels, {x: "E", y: "N", text: "text", rotate: "rot", fontSize: 11,
+                               stroke: "white", strokeWidth: 4, fill: "currentColor", lineAnchor: "middle"}),
+      Plot.arrow([{x1: arrowE, y1: arrowN - 0.12 * span, x2: arrowE, y2: arrowN}],
+                 {x1: "x1", y1: "y1", x2: "x2", y2: "y2", strokeWidth: 2, headLength: 10}),
+      Plot.text([{x: arrowE, y: arrowN - 0.16 * span}], {x: "x", y: "y", text: () => "N", fontSize: 16, fontWeight: "bold"})
+    ]
+  });
+}
+
+// Typeset \\( … \\) math in an element produced by a cell, waiting for MathJax to finish loading
+function typeset(el) {
+  const run = () => window.MathJax?.startup?.promise?.then(() => MathJax.typesetPromise([el]));
+  if (window.MathJax?.typesetPromise) run();
+  else window.addEventListener("load", run, {once: true});
+}
+
+// Compact table with one row per line. `columns` is [{head, cell, total?}], where head is TeX
+// (typeset like the document's equations, or plain text if it starts with "!") and cell(row) gives the text.
+function texTable(rows, columns) {
+  const head = c => c.head.startsWith("!") ? c.head.slice(1) : `\\(${c.head}\\)`;
+  const cls = (c, i) => [i > 0 ? "num" : "", c.total ? "total" : ""].join(" ");
+  const table = html`<table class="lines-table">
+    <thead><tr>${columns.map((c, i) => html`<th class="${cls(c, i)}">${head(c)}</th>`)}</tr></thead>
+    <tbody>${rows.map(r => html`<tr>${columns.map((c, i) => html`<td class="${cls(c, i)}">${c.cell(r)}</td>`)}</tr>`)}</tbody>
+  </table>`;
+  typeset(table);
+  return html`<div class="table-scroll">${table}</div>`;
+}
+
+function stat(label, value, note) {
+  return html`<div class="stat"><div class="stat-label">${label}</div>
+    <div class="stat-value">${value}</div><div class="stat-note">${note}</div></div>`;
+}
+```
+
+```{ojs}
+//| echo: false
+// ---- Editable tables -------------------------------------------------------
+
+// A number field bound to obj[key]: valid edits are written back and reported with onChange(),
+// invalid ones are outlined in red and not written. The field widens to fit its value.
+// With a display unit, `factor` is stored units per displayed unit: the field shows obj[key] / factor
+// and stores typed values × factor, so switching units never changes the stored value.
+function numberInput(obj, key, onChange, {min = 0, max, positive = false, integer = false, step = "any",
+                                          cls = "", pad = 0, decimals = 4, sig, factor = 1, minCh = 2, label = ""} = {}) {
+  const input = html`<input type="number" inputmode="decimal" class="${cls}" min="${min}" step="${step}" aria-label="${label}">`;
+  if (max != null) input.max = max;
+  // Up to `decimals` places, or `sig` significant figures (hides float noise from unit conversions);
+  // integer part zero-padded
+  const show = v => {
+    const r = sig ? Number(v.toPrecision(sig)) : Math.round(v * 10 ** decimals) / 10 ** decimals;
+    const str = String(r).includes("e") ? r.toFixed(20).replace(/\.?0+$/, "") : String(r);
+    const [int, frac] = str.split(".");
+    return int.padStart(pad, "0") + (frac ? `.${frac}` : "");
+  };
+  const fit = () => { input.style.width = `${Math.max(minCh, input.value.length) + 0.5}ch`; };
+  input.value = show(obj[key] / factor);
+  fit();
+  input.oninput = () => {
+    const v = input.valueAsNumber;
+    const ok = Number.isFinite(v) && v >= min && (max == null || v < max) && (!positive || v > 0)
+      && (!integer || Number.isInteger(v));
+    input.classList.toggle("invalid", !ok);
+    if (ok) { obj[key] = v * factor; onChange(); }
+    fit();
+  };
+  input.onblur = () => { if (!input.classList.contains("invalid")) { input.value = show(obj[key] / factor); fit(); } };
+  return input;
+}
+```
+
+```{ojs}
+//| echo: false
+// Traverse editor: its value is {startAz, rows}. Typing updates the value without
+// rebuilding the table (so focus is kept); adding, removing, or resetting rebuilds it.
+
+function traverseEditor(initial) {
+  let state = structuredClone(initial);
+  const root = document.createElement("div");
+  root.className = "trav-editor";
+
+  const emit = () => {
+    root.value = structuredClone(state);
+    root.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+
+  const num = (obj, key, opts) => numberInput(obj, key, emit, opts);
+
+  // Degrees, minutes, and seconds as one field with unit marks between the inputs
+  const dmsField = (obj, label) => html`<span class="dms-field">
+    ${num(obj, "deg", {max: 360, step: 1, cls: "deg", minCh: 3, label: `${label} degrees`})}<span class="unit">°</span>
+    ${num(obj, "min", {max: 60, step: 1, cls: "min", pad: 2, label: `${label} minutes`})}<span class="unit">′</span>
+    ${num(obj, "sec", {max: 60, step: 1, cls: "sec", pad: 2, label: `${label} seconds`})}<span class="unit">″</span>
+  </span>`;
+
+  function render() {
+    const firstLine = `${state.rows[0].station} → ${state.rows[1].station}`;
+
+    const body = state.rows.map((row, i) => {
+      // Set disabled as a property: the html template writes disabled="false", which still disables
+      const remove = html`<button type="button" class="remove" title="Remove station" aria-label="Remove station">✕</button>`;
+      remove.disabled = state.rows.length <= 3;
+      // Station names aren't editable, so renumber to keep them 1…n
+      remove.onclick = () => {
+        state.rows.splice(i, 1);
+        state.rows.forEach((r, j) => { r.station = String(j + 1); });
+        render(); emit();
+      };
+      // With the first line's azimuth held, the first station's angle only enters the closure check
+      const note = i === 0
+        ? html`<span class="angle-note" title="The azimuth of the first line is fixed, so this angle doesn't move any lines. It only affects the angular misclosure.">closure check</span>`
+        : "";
+      const dist = html`<span class="dist-field">${num(row, "dist", {min: 0, positive: true, step: 0.01, cls: "dist", minCh: 6, label: "Foresight distance"})}</span>`;
+      return html`<tr><td class="station">${row.station}</td><td><span class="angle-cell">${dmsField(row, "Interior angle")}${note}</span></td>
+        <td>${dist}</td><td class="col-remove">${remove}</td></tr>`;
+    });
+
+    const add = html`<button type="button" class="add">+ Add station</button>`;
+    add.onclick = () => {
+      const last = state.rows[state.rows.length - 1];
+      state.rows.push({station: String(state.rows.length + 1), deg: 180, min: 0, sec: 0, dist: last.dist});
+      render(); emit();
+    };
+    const close = html`<button type="button" class="close-trav" title="Recompute the last line's distance and the angles at the last and first stations so the traverse closes exactly">Close traverse</button>`;
+    close.onclick = () => {
+      state = closeTraverse(state);
+      render(); emit();
+      // Briefly highlight the fields that were recalculated
+      const trs = root.querySelectorAll(".trav-table tbody tr");
+      const changed = [trs[0].querySelector(".dms-field"), ...trs[trs.length - 1].querySelectorAll(".dms-field, .dist-field")];
+      changed.forEach(el => el.classList.add("flash"));
+    };
+    const reset = html`<button type="button" class="reset">Reset to defaults</button>`;
+    reset.onclick = () => { state = structuredClone(initial); render(); emit(); };
+
+    root.replaceChildren(html`<div class="trav-card">
+      <div class="trav-head">
+        <span class="field-label">Azimuth of line ${firstLine}</span>
+        ${dmsField(state.startAz, "Starting azimuth")}
+      </div>
+      <div class="trav-scroll"><table class="trav-table">
+        <thead><tr><th>Station</th><th>Interior angle <span class="th-note">turned right</span></th>
+          <th>Foresight distance</th><th class="col-remove"></th></tr></thead>
+        <tbody>${body}</tbody>
+      </table></div>
+      <div class="trav-foot"><span class="foot-group">${add}${close}</span>${reset}</div>
+    </div>`);
+  }
+
+  render();
+  root.value = structuredClone(state);
+  return root;
+}
+```
+
+```{ojs}
+//| echo: false
+// Instrument editor: one row per field, label on the left and value on the right.
+// Its value is a plain object keyed by the fields' keys, always in each field's stored unit.
+// A field with `units` (a list of {id, label, factor}) gets a picker that changes only how its value
+// is shown and entered; a field with `unit` shows that fixed label. An optional `note` is shown under the label.
+
+function instrumentEditor(title, fields, initial) {
+  let state = structuredClone(initial);
+  const defaultUnits = () => Object.fromEntries(fields.filter(f => f.units).map(f => [f.key, f.units[0].id]));
+  let displayUnits = defaultUnits();
+  const root = document.createElement("div");
+  root.className = "trav-editor inst-editor";
+
+  const emit = () => {
+    root.value = structuredClone(state);
+    root.dispatchEvent(new Event("input", {bubbles: true}));
+  };
+
+  function valueField(f) {
+    const unit = f.units?.find(u => u.id === displayUnits[f.key]);
+    const input = () => numberInput(state, f.key, emit, {
+      min: 0, integer: !!f.integer, positive: !!f.integer, step: f.integer ? 1 : "any",
+      sig: 7, factor: unit?.factor ?? 1, minCh: 11, label: f.label
+    });
+    if (!f.units) return html`<span class="dist-field">${input()}<span class="unit">${f.unit ?? ""}</span></span>`;
+
+    const select = html`<select class="unit-select" aria-label="${f.label} unit">
+      ${f.units.map(u => html`<option value="${u.id}">${u.label}</option>`)}
+    </select>`;
+    select.value = displayUnits[f.key];
+    const field = html`<span class="dist-field">${input()}${select}</span>`;
+    // Swap only the number input, so the stored value is untouched and the picker keeps focus
+    select.onchange = () => {
+      displayUnits[f.key] = select.value;
+      field.replaceChild(valueField(f).firstElementChild, field.firstElementChild);
+    };
+    return field;
+  }
+
+  function render() {
+    const rows = fields.map(f => html`<div class="inst-row">
+      <span class="inst-label">${f.label}${f.note ? html`<span class="inst-note">${f.note}</span>` : ""}</span>
+      ${valueField(f)}
+    </div>`);
+
+    const reset = html`<button type="button" class="reset">Reset to defaults</button>`;
+    reset.onclick = () => { state = structuredClone(initial); displayUnits = defaultUnits(); render(); emit(); };
+
+    root.replaceChildren(html`<div class="trav-card">
+      <div class="trav-head"><span class="field-label">${title}</span></div>
+      <div class="inst-grid">${rows}</div>
+      <div class="trav-foot"><span></span>${reset}</div>
+    </div>`);
+  }
+
+  render();
+  root.value = structuredClone(state);
+  return root;
+}
+```
+
+```{=html}
+<style>
+.trav-editor {
+  --trav-border: var(--bs-border-color, #dee2e6);
+  --trav-muted: var(--bs-secondary-color, #6c757d);
+  --trav-subtle: var(--bs-tertiary-bg, #f8f9fa);
+  --trav-accent: var(--bs-primary, #2780e3);
+  --trav-danger: var(--bs-danger, #ff0039);
+  margin: 1rem 0;
+}
+.trav-card { border: 1px solid var(--trav-border); border-radius: 8px; overflow: hidden; }
+.trav-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
+  padding: 0.75rem 1rem; background: var(--trav-subtle); border-bottom: 1px solid var(--trav-border);
+}
+.trav-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.5rem 1rem; border-top: 1px solid var(--trav-border); background: var(--trav-subtle);
+}
+/* Own button styles, specific enough to win over the btn-quarto class Quarto adds on load */
+.trav-editor .trav-foot button {
+  font: inherit; font-size: 0.875rem; border-radius: 6px; padding: 0.3rem 0.75rem; cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.trav-editor .trav-foot button.add {
+  color: var(--trav-accent); background: var(--bs-body-bg, #fff); border: 1px solid var(--trav-accent);
+}
+.trav-editor .trav-foot button.add:hover { color: #fff; background: var(--trav-accent); }
+.trav-editor .trav-foot button.close-trav {
+  color: var(--bs-body-color, #343a40); background: var(--bs-body-bg, #fff); border: 1px solid var(--trav-border);
+}
+.trav-editor .trav-foot button.close-trav:hover { border-color: var(--trav-accent); color: var(--trav-accent); }
+.foot-group { display: inline-flex; gap: 0.5rem; flex-wrap: wrap; }
+.trav-editor .flash { animation: trav-flash 1.6s ease-out; }
+@keyframes trav-flash {
+  0%, 30% { background: color-mix(in srgb, var(--trav-accent) 22%, var(--bs-body-bg, #fff)); border-color: var(--trav-accent); }
+}
+.trav-editor .trav-foot button.reset { color: var(--trav-muted); background: none; border: 1px solid transparent; }
+.trav-editor .trav-foot button.reset:hover { color: var(--trav-accent); }
+.field-label, .trav-table th {
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--trav-muted);
+}
+.th-note { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.trav-scroll { overflow-x: auto; }
+.trav-table { width: 100%; border-collapse: collapse; }
+.trav-table th { text-align: left; padding: 0.6rem 1rem 0.4rem; border-bottom: 1px solid var(--trav-border); }
+.trav-table td { padding: 0.35rem 1rem; vertical-align: middle; }
+.trav-table tbody tr + tr td { border-top: 1px solid var(--trav-border); }
+.trav-table tbody tr:hover { background: var(--trav-subtle); }
+.trav-table .col-remove { width: 1%; text-align: right; }
+
+.trav-editor input {
+  font: inherit; font-variant-numeric: tabular-nums; color: inherit; background: transparent;
+  border: none; outline: none; padding: 0.25rem 0.1rem; text-align: right;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.trav-editor input::-webkit-outer-spin-button,
+.trav-editor input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+.trav-table td.station { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Compound D°M′S″ and distance fields */
+.dms-field, .dist-field {
+  display: inline-flex; align-items: baseline; padding: 0 0.5rem; white-space: nowrap;
+  border: 1px solid var(--trav-border); border-radius: 6px; background: var(--bs-body-bg, #fff);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.dms-field:focus-within, .dist-field:focus-within {
+  border-color: var(--trav-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--trav-accent) 20%, transparent);
+}
+.dms-field:has(input.invalid), .dist-field:has(input.invalid) {
+  border-color: var(--trav-danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--trav-danger) 20%, transparent);
+}
+.dms-field .unit { color: var(--trav-muted); margin-right: 0.35rem; }
+.dms-field .unit:last-child { margin-right: 0; }
+
+.angle-cell { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.angle-note {
+  font-size: 0.7rem; color: var(--trav-muted); cursor: help; white-space: nowrap;
+  border: 1px dashed var(--trav-border); border-radius: 999px; padding: 0.05rem 0.5rem;
+}
+
+/* Remove: quiet until hovered */
+.trav-editor button.remove {
+  border: none; background: none; color: var(--trav-muted); width: 2rem; height: 2rem;
+  border-radius: 50%; line-height: 1; cursor: pointer;
+}
+.trav-editor button.remove:hover:not(:disabled) {
+  color: var(--trav-danger); background: color-mix(in srgb, var(--trav-danger) 12%, transparent);
+}
+.trav-editor button.remove:disabled { opacity: 0.3; cursor: not-allowed; }
+
+@media (max-width: 600px) {
+  .trav-head, .trav-foot { padding-left: 0.6rem; padding-right: 0.6rem; }
+  .trav-table th, .trav-table td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  .trav-editor button.remove { width: 1.6rem; height: 1.6rem; }
+  .dms-field, .dist-field { padding: 0 0.35rem; }
+}
+
+/* Instrument card */
+.inst-grid { padding: 0 1rem; }
+.inst-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  padding: 0.4rem 0; margin: 0;
+}
+.inst-row + .inst-row { border-top: 1px solid var(--trav-border); }
+.inst-label { font-size: 0.9rem; }
+.inst-note { display: block; font-size: 0.75rem; color: var(--trav-muted); }
+/* Fixed-width unit slot (plain label or picker) so values line up whatever the unit */
+.inst-editor .dist-field .unit, .inst-editor .unit-select {
+  color: var(--trav-muted); font: inherit; font-size: 0.8rem; text-align: left;
+  box-sizing: border-box; width: 3.6em; padding: 0.15rem 1.1em 0.15rem 0.3rem; margin: 0 -0.3rem 0 0.3rem;
+}
+.inst-editor .dist-field { align-items: center; }
+.inst-editor .unit-select {
+  appearance: none; -webkit-appearance: none; border: none; border-radius: 4px; cursor: pointer;
+  background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 0.3rem center;
+}
+.inst-editor .unit-select:hover, .inst-editor .unit-select:focus-visible { color: var(--trav-accent); background-color: var(--trav-subtle); outline: none; }
+
+/* Lines table under the diagram: plain and compact */
+.lines-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
+.lines-table th { font-weight: 600; text-align: left; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--bs-border-color, #ccc); }
+.lines-table td { padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--bs-border-color-translucent, #eee); white-space: nowrap; }
+.lines-table .num { text-align: right; }
+.lines-table .total { font-weight: 600; }
+.table-scroll { overflow-x: auto; }
+.lines-table th:first-child, .lines-table td:first-child { padding-left: 0; }
+.lines-table th:last-child, .lines-table td:last-child { padding-right: 0; }
+
+.closure-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem; margin: 1rem 0; }
+.closure-stats .stat { border: 1px solid var(--bs-border-color, #ddd); border-radius: 8px; padding: 0.5rem 0.75rem; }
+.stat-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--bs-secondary-color, #666); }
+.stat-value { font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat-note { font-size: 0.75rem; color: var(--bs-secondary-color, #888); }
+</style>
+```
+
+# Instrument Specification
+
+```{ojs}
+//| echo: false
+viewof instrument = instrumentEditor("Instrument Specifications & Estimated Errors", [
+  {key: "edmConstant",         label: "EDM Constant Error",         units: LENGTH_UNITS},
+  {key: "edmScalar",           label: "EDM Scalar Error",           unit: "ppm"},
+  {key: "instrumentCentering", label: "Instrument Centering Error", units: LENGTH_UNITS},
+  {key: "targetCentering",     label: "Target Centering Error",     units: LENGTH_UNITS},
+  {key: "readingError",        label: "Reading Error",              units: ANGLE_UNITS},
+  {key: "pointingError",       label: "Pointing Error",             units: ANGLE_UNITS},
+  {key: "drReadings",          label: "Direct and Reversed Readings", unit: "#", integer: true,
+   note: "Total number of individual readings: count each direct and each reversed (2 sets = 4)"}
+], {
+  edmConstant: 0.003280833, edmScalar: 2,
+  instrumentCentering: 0.0033, targetCentering: 0.0033,
+  readingError: 2, pointingError: 2, drReadings: 4
+})
+```
+
+# Errors
+
+## Foresight Distance Errors
+
+From the equation for EDM distance error [@ghilani2022, eq. 6.15],
+
+$$E_d = \sqrt{E_i^2 + E_t^2 + E_c^2 + (ppm \cdot D)^2}$$
+
+where $E_i$ is the instrument centering error,
+$E_t$ is the target centering error,
+$E_c$ the instrument constant error,
+$ppm$ the instrument's scalar error as a fraction of a million and
+$D$ the measured distance,
+the foresight distance error $E_d$ for each leg of the traverse is computed as
+
+```{ojs}
+//| echo: false
+texTable(distErrors, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "D", cell: e => e.D.toFixed(2)},
+  {head: "E_i", cell: e => e.Ei.toFixed(5)},
+  {head: "E_t", cell: e => e.Et.toFixed(5)},
+  {head: "E_c", cell: e => e.Ec.toFixed(5)},
+  {head: "ppm \\times D", cell: e => e.scale.toFixed(5)},
+  {head: "E_d", cell: e => e.Ed.toFixed(5), total: true}
+])
+```
+
+## Foresight Angular Errors
+
+The foresight azimuth or angular error $E_a$ is the combination of instrument reading and pointing error as well
+as the angular effect of the instrument and target centering errors.
+We combine them using the root sum of squares, using the form of equation 3.11 [@ghilani2022] since all four errors have different magnitudes:
+
+$$E_a = \sqrt{E_r^2 + E_p^2 + E_{a_i}^2 + E_{a_t}^2}$$
+
+where $E_r$  and $E_p$ are the reading and pointing error, respectively, adjusted by the number of direct and reversed readings,
+and $E_{a_i}$ and $E_{a_t}$ are the angular effects of the instrument and target errors, respectively.
+
+### Reading & Pointing Error
+
+Repeated angular observations with the same instrument are independent and each have the same reading and pointing error, so we can
+apply equation 3.14 [@ghilani2022] to compute each.
+
+Reading error $E_r$ for $n$ observations is computed as $E_r = \frac{E}{\sqrt{n}}$ where $E$ is the estimated reading error of a single observation.
+
+```{ojs}
+//| echo: false
+{
+  const card = html`<div class="closure-stats">
+    ${stat("Reading error", `${rpError.Er.toFixed(2)}″`, `\\(E_r = ${+spec.readingError.toFixed(4)}^{\\prime\\prime} / \\sqrt{${rpError.n}}\\)`)}
+  </div>`;
+  typeset(card);
+  return card;
+}
+```
+
+Similarly, pointing error $E_p$ is computed as $E_p = \frac{E}{\sqrt{n}}$ where $E$ is the estimated pointing error of a single observation.
+
+```{ojs}
+//| echo: false
+{
+  const card = html`<div class="closure-stats">
+    ${stat("Pointing error", `${rpError.Ep.toFixed(2)}″`, `\\(E_p = ${+spec.pointingError.toFixed(4)}^{\\prime\\prime} / \\sqrt{${rpError.n}}\\)`)}
+  </div>`;
+  typeset(card);
+  return card;
+}
+```
+
+### Target Centering Error
+
+Target centering error is the angular effect of the backsight and foresight targets not being exactly over their stations.
+For backsight distance $D_1$ and foresight distance $D_2$ it is computed as
+
+$$E_{a_t} = E_t \left(\frac{\sqrt{D_1^2+D_2^2}}{D_1 \cdot D_2}\right)$$
+
+where $E_t$ is the target centering error. The result is in radians, so multiply by the number of seconds in a radian (206,265″), $\rho$, to give seconds.
+For the angle at the first station of each leg, the target centering error is
+
+```{ojs}
+//| echo: false
+texTable(centErrors, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "D_1", cell: e => e.D1.toFixed(2)},
+  {head: "D_2", cell: e => e.D2.toFixed(2)},
+  {head: "E_{a_t}", cell: e => `${e.Eat.toFixed(2)}″`, total: true}
+])
+```
+
+### Instrument Centering Error
+
+Instrument centering error is the angular effect of the instrument not being exactly over its station. It is computed as
+
+$$E_{a_i} = \left(\frac{D_3}{D_1 \cdot D_2}\right) \left(\frac{E_i}{\sqrt{2}}\right)$$
+
+where $E_i$ is the instrument centering error and $D_3$ is the distance between the backsight and foresight stations,
+computed by the law of cosines
+
+$$D_3 = \sqrt{D_1^2 + D_2^2 - 2 D_1 D_2 \cos\alpha}$$
+
+As above, the result is multiplied by $\rho$ to give seconds. For the angle at the first station of each leg, the instrument centering error is
+
+```{ojs}
+//| echo: false
+texTable(centErrors, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "D_1", cell: e => e.D1.toFixed(2)},
+  {head: "D_2", cell: e => e.D2.toFixed(2)},
+  {head: "D_3", cell: e => e.D3.toFixed(2)},
+  {head: "E_{a_i}", cell: e => `${e.Eai.toFixed(2)}″`, total: true}
+])
+```
+
+::: {.callout-note title="Why aren't centering errors adjusted for the number of readings like reading and pointing errors?"}
+Remember: Random errors tend to cancel out. More observations will trend our mean observation towards the true value, and in repeated observations we account for this by dividing by the root of the number of observations.
+But unlike pointing and reading, which occur anew on each observation, instrument and target centering is only performed once per occupation.
+This gives no opportunity for repetition to reduce the error so we do not adjust for the number of observations.
+:::
+
+## Latitude & Departure Errors
+
+### Error in Latitude
+
+Each leg's latitude $D \cos Az$ is affected by both its azimuth error and its distance error.
+Taking the azimuth error as the total angular error $E_a$ of the angle at the start of the leg (converted from seconds),
+and $E_d$ as the leg's distance error, each effect is the difference between the errorless latitude and the latitude with that error applied
+
+$$E_{\text{Lat}_a} = D \cos Az - D \cos(Az + E_a)$$
+
+$$E_{\text{Lat}_d} = D \cos Az - (D + E_d) \cos Az$$
+
+The two are independent, so the error in latitude is their root sum of squares
+
+$$E_{\text{Lat}} = \sqrt{E_{\text{Lat}_a}^2 + E_{\text{Lat}_d}^2}$$
+
+```{ojs}
+//| echo: false
+texTable(lineErrs, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "Az", cell: e => formatAzimuth(e.azimuth)},
+  {head: "D", cell: e => e.D.toFixed(2)},
+  {head: "E_a", cell: e => `${e.Ea.toFixed(2)}″`},
+  {head: "E_d", cell: e => e.Ed.toFixed(5)},
+  {head: "E_{\\text{Lat}_a}", cell: e => e.latAz.toFixed(5)},
+  {head: "E_{\\text{Lat}_d}", cell: e => e.latDist.toFixed(5)},
+  {head: "E_{\\text{Lat}}", cell: e => e.Elat.toFixed(5), total: true}
+])
+```
+
+### Error in Departure
+
+Likewise for each leg's departure $D \sin Az$
+
+$$E_{\text{Dep}_a} = D \sin Az - D \sin(Az + E_a)$$
+
+$$E_{\text{Dep}_d} = D \sin Az - (D + E_d) \sin Az$$
+
+$$E_{\text{Dep}} = \sqrt{E_{\text{Dep}_a}^2 + E_{\text{Dep}_d}^2}$$
+
+```{ojs}
+//| echo: false
+texTable(lineErrs, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "E_{\\text{Dep}_a}", cell: e => e.depAz.toFixed(5)},
+  {head: "E_{\\text{Dep}_d}", cell: e => e.depDist.toFixed(5)},
+  {head: "E_{\\text{Dep}}", cell: e => e.Edep.toFixed(5), total: true}
+])
+```
+
+## Error in Position
+
+Finally, the latitude and departure errors are combined by root sum of squares to give the error in position, $E_p$,
+of the station at the end of each leg relative to the station at the start of the leg:
+
+$$E_P = \sqrt{E_{\text{Lat}}^2 + E_{\text{Dep}}^2}$$
+
+```{ojs}
+//| echo: false
+texTable(lineErrs, [
+  {head: "!Line", cell: e => `${e.from} → ${e.to}`},
+  {head: "E_{\\text{Lat}}", cell: e => e.Elat.toFixed(5)},
+  {head: "E_{\\text{Dep}}", cell: e => e.Edep.toFixed(5)},
+  {head: "E_P", cell: e => e.Epos.toFixed(5), total: true}
+])
+```
+
