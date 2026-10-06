@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "dev": "concurrently -k -n tsc,quarto -c blue,green \"tsc --watch --preserveWatchOutput\" \"quarto preview traverse.qmd\"",
+    "dev": "concurrently -k -n tsc,quarto -c blue,green \"tsc --watch --preserveWatchOutput\" \"quarto preview\"",
     "render": "quarto render",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run typecheck && node --test \"tests/**/*.test.ts\""

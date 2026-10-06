@@ -1,3 +1,16 @@
 project:
-  type: default
+  type: website
+  output-dir: _site
   pre-render: npm run build
+  # Compiled TypeScript the notebooks import from OJS cells
+  resources:
+    - /js/*.js
+
+website:
+  title: "Surveying Notebooks"
+  site-url: https://gavincabbage.github.io/svt/
+  repo-url: https://github.com/gavincabbage/svt
+  navbar:
+    left:
+      - href: index.qmd
+        text: Notebooks

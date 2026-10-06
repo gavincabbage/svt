@@ -12,10 +12,12 @@ __pycache__/
 
 # Quarto
 .quarto/
-/*.html
-/*_files/
+_site/
 
 # Editors / OS
 .idea/
 .vscode/
 .DS_Store
+
+/.quarto/
+**/*.quarto_ipynb

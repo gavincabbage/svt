@@ -1,0 +1,12 @@
+---
+title: "Surveying Notebooks"
+listing:
+  contents: notebooks/*.qmd
+  type: table
+  sort: title
+  fields: [title, description]
+  sort-ui: false
+  filter-ui: false
+---
+
+Interactive notebooks for land surveying computations.

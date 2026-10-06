@@ -1,11 +1,12 @@
 ---
 title: "Traverse Error Propagation"
+description: "Model error propagation within a closed traverse with an arbitrary number of legs."
 format:
   html:
     toc: true
     code-fold: true
 jupyter: python3
-bibliography: references.bib
+bibliography: ../references.bib
 ---
 
 Use this page to model error propagation within a closed traverse with an arbitrary number of legs.
@@ -88,9 +89,9 @@ html`<table class="lines-table">
 // ---- Computation -----------------------------------------------------------
 // The math lives in src/traverse.ts (tested with `npm test`), compiled to js/traverse.js.
 
-import {analyzeTraverse, closeTraverse, parseTraverse, formatDms, formatAzimuth} from "./js/traverse.js"
-import {parseInstrument, ANGLE_UNITS, LENGTH_UNITS} from "./js/instrument.js"
-import {distanceErrors, readingPointingError, centeringErrors, lineErrors} from "./js/errors.js"
+import {analyzeTraverse, closeTraverse, parseTraverse, formatDms, formatAzimuth} from "../js/traverse.js"
+import {parseInstrument, ANGLE_UNITS, LENGTH_UNITS} from "../js/instrument.js"
+import {distanceErrors, readingPointingError, centeringErrors, lineErrors} from "../js/errors.js"
 ```
 
 ```{ojs}
