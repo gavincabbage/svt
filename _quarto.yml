@@ -1,8 +1,9 @@
 project:
   type: website
   output-dir: _site
-  pre-render: npm run build
-  # Compiled TypeScript the notebooks import from OJS cells
+  # Compiled TypeScript the notebooks import from OJS cells. Built outside Quarto
+  # (npm run render / npm run dev): a pre-render hook would rewrite js/ on every
+  # preview render, which reloads the preview back to the home page.
   resources:
     - /js/*.js
 

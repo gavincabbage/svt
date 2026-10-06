@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "dev": "concurrently -k -n tsc,quarto -c blue,green \"tsc --watch --preserveWatchOutput\" \"quarto preview\"",
-    "render": "quarto render",
+    "dev": "tsc && concurrently -k -n tsc,tsc-site,quarto -c blue,cyan,green \"tsc --watch --preserveWatchOutput\" \"tsc --watch --preserveWatchOutput --outDir _site/js\" \"quarto preview\"",
+    "render": "npm run build && quarto render",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "npm run typecheck && node --test \"tests/**/*.test.ts\""
   },

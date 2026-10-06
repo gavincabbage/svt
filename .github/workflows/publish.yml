@@ -34,7 +34,7 @@ jobs:
       - uses: quarto-dev/quarto-actions/setup@v2
         with:
           version: 1.10.18
-      - run: quarto render
+      - run: npm run render
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
