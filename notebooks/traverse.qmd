@@ -9,10 +9,11 @@ jupyter: python3
 bibliography: ../references.bib
 ---
 
-Use this page to model error propagation within a closed traverse with an arbitrary number of legs.
-
+::: {.callout-warning title="No propagation between courses"}
 This page currently models propagation of each leg of the traverse independently. It does not carry
-forward errors from leg to leg from any control points.
+forward errors from through subsequent courses extending away from any control points.
+:::
+
 
 # Field Data
 
@@ -167,6 +168,131 @@ function traversePlot(res, w) {
                  {x1: "x1", y1: "y1", x2: "x2", y2: "y2", strokeWidth: 2, headLength: 10}),
       Plot.text([{x: arrowE, y: arrowN - 0.16 * span}], {x: "x", y: "y", text: () => "N", fontSize: 16, fontWeight: "bold"})
     ]
+  });
+}
+
+// ---- Zoomed error diagrams -------------------------------------------------
+// Each centres on the end station of one line at true scale, with offsets in US survey feet like the tables.
+// Errors are drawn for positive E_a and E_d; either sign is equally likely.
+
+ANG_COLOR = "darkorange"
+DIST_COLOR = "seagreen"
+TOTAL_COLOR = "steelblue"
+
+// One line's errors as offsets of its end station: `ang` and `dist` are where the end station
+// moves under +E_a and +E_d alone; `u` and `v` are unit vectors along and across the line.
+function errorGeometry(e) {
+  const a = e.azimuth * Math.PI / 180;
+  const ang = {E: -e.depAz, N: -e.latAz}, dist = {E: -e.depDist, N: -e.latDist};
+  const across = Math.hypot(ang.E, ang.N), along = e.Ed;
+  const u = {E: Math.sin(a), N: Math.cos(a)};
+  const v = across > 0 ? {E: ang.E / across, N: ang.N / across} : {E: u.N, N: -u.E};
+  return {ang, dist, along, across, u, v, Elat: e.Elat, Edep: e.Edep, Epos: e.Epos};
+}
+
+// Same precision as the tables
+len = v => Math.abs(v).toFixed(5)
+
+// Equal-scale plot centred on the line's end station, showing the line coming in. `marks(g, frame)` adds the rest.
+function zoomPlot(e, w, caption, marks) {
+  const g = errorGeometry(e);
+  const h = Math.round(w * 0.75);
+  const margin = {top: 20, right: 20, bottom: 45, left: 55};
+  const innerW = w - margin.left - margin.right, innerH = h - margin.top - margin.bottom;
+  const R = 1.35 * Math.max(g.Epos, 1e-9);
+  const upp = 2 * R / Math.min(innerW, innerH);
+  const frame = {x: [-upp * innerW / 2, upp * innerW / 2], y: [-upp * innerH / 2, upp * innerH / 2], R};
+
+  // The line runs in from its start station, far off-plot; label it where it enters
+  const back = 3 * frame.x[1] + 3 * frame.y[1];
+  let rot = -Math.atan2(g.u.N, g.u.E) * 180 / Math.PI;
+  if (rot > 90) rot -= 180;
+  if (rot < -90) rot += 180;
+  const lineLabel = {E: -0.75 * R * g.u.E, N: -0.75 * R * g.u.N, rot, text: `line ${e.from} → ${e.to}`};
+
+  return Plot.plot({
+    width: w, height: h, caption,
+    marginTop: margin.top, marginRight: margin.right, marginBottom: margin.bottom, marginLeft: margin.left,
+    x: {domain: frame.x, label: "ΔE (USF)", grid: true},
+    y: {domain: frame.y, label: "ΔN (USF)", grid: true},
+    marks: [
+      Plot.link([{}], {x1: 0, y1: 0, x2: -back * g.u.E, y2: -back * g.u.N, stroke: "currentColor",
+                       strokeOpacity: 0.35, strokeWidth: 6, clip: true}),
+      Plot.text([lineLabel], {x: "E", y: "N", text: "text", rotate: "rot", fontSize: 11, dy: -10,
+                              fill: "currentColor", fillOpacity: 0.7}),
+      ...marks(g, frame),
+      Plot.dot([{}], {x: 0, y: 0, r: 5, fill: "crimson"}),
+      Plot.text([{}], {x: 0, y: 0, text: () => e.to, dx: -8, dy: -10, fontWeight: "bold", fontSize: 12,
+                       stroke: "white", strokeWidth: 4, fill: "currentColor"})
+    ]
+  });
+}
+
+// Latitude (axis "N") or departure (axis "E") error: the end station's moves under E_a and E_d,
+// their components along the axis, and the combined ± band.
+function componentPlot(e, axis, w) {
+  const isN = axis === "N", name = isN ? "Lat" : "Dep";
+  const caption = `Line ${e.from} → ${e.to}: the end station moved by +E_a and +E_d separately. Their ${isN ? "north–south" : "east–west"} components are the ${isN ? "latitude" : "departure"} errors E_${name},a and E_${name},d; the band is ±E_${name}.`;
+  return zoomPlot(e, w, caption, (g, f) => {
+    const total = isN ? g.Elat : g.Edep;
+    const comps = [{p: g.ang, color: ANG_COLOR, text: `E_${name},a ${len(isN ? g.ang.N : g.ang.E)}`},
+                   {p: g.dist, color: DIST_COLOR, text: `E_${name},d ${len(isN ? g.dist.N : g.dist.E)}`}];
+    // The component runs from the foot (on the other axis) to the moved end station
+    const foot = p => isN ? {E: p.E, N: 0} : {E: 0, N: p.N};
+    const band = isN ? Plot.rect([{}], {x1: f.x[0], x2: f.x[1], y1: -total, y2: total, fill: TOTAL_COLOR, fillOpacity: 0.12})
+                     : Plot.rect([{}], {x1: -total, x2: total, y1: f.y[0], y2: f.y[1], fill: TOTAL_COLOR, fillOpacity: 0.12});
+    const edges = isN ? Plot.ruleY([-total, total], {stroke: TOTAL_COLOR, strokeDasharray: "4,3"})
+                      : Plot.ruleX([-total, total], {stroke: TOTAL_COLOR, strokeDasharray: "4,3"});
+    const bandLabel = isN ? {x: f.x[1], y: total, textAnchor: "end", dx: -4, dy: -7}
+                          : {x: total, y: f.y[1], textAnchor: "start", dx: 4, dy: 8};
+    return [
+      band, edges,
+      Plot.text([{}], {...bandLabel, text: () => `±E_${name} ${len(total)}`, fill: TOTAL_COLOR, fontWeight: "bold", fontSize: 12}),
+      ...comps.flatMap(c => {
+        const ft = foot(c.p);
+        return [
+          Plot.arrow([{}], {x1: 0, y1: 0, x2: c.p.E, y2: c.p.N, stroke: c.color, strokeOpacity: 0.5, headLength: 8}),
+          Plot.link([{}], {x1: 0, y1: 0, x2: ft.E, y2: ft.N, stroke: c.color, strokeDasharray: "2,3"}),
+          Plot.link([{}], {x1: ft.E, y1: ft.N, x2: c.p.E, y2: c.p.N, stroke: c.color, strokeWidth: 3}),
+          Plot.text([{}], {x: (ft.E + c.p.E) / 2, y: (ft.N + c.p.N) / 2, text: () => c.text, fill: c.color,
+                           fontSize: 11, fontWeight: "bold", stroke: "white", strokeWidth: 4,
+                           ...(isN ? {textAnchor: c.p.E >= 0 ? "start" : "end", dx: c.p.E >= 0 ? 6 : -6}
+                                   : {dy: c.p.N >= 0 ? -9 : 9})})
+        ];
+      })
+    ];
+  });
+}
+
+// Position error: the ellipse with semi-axes E_d along the line and D·E_a across it, its E_Dep × E_Lat
+// bounding box, and E_P as the box's half-diagonal.
+function ellipsePlot(e, w) {
+  const caption = `Line ${e.from} → ${e.to}: the error ellipse has semi-axes E_d along the line and D·E_a across it. It just fits the ±E_Dep × ±E_Lat box, and E_P is the box's half-diagonal.`;
+  return zoomPlot(e, w, caption, g => {
+    const ellipse = Array.from({length: 121}, (_, i) => {
+      const t = 2 * Math.PI * i / 120, c = g.along * Math.cos(t), s = g.across * Math.sin(t);
+      return {E: c * g.u.E + s * g.v.E, N: c * g.u.N + s * g.v.N};
+    });
+    const axis = (p, color, text, opts) => [
+      Plot.link([{}], {x1: 0, y1: 0, x2: p.E, y2: p.N, stroke: color, strokeWidth: 2.5}),
+      Plot.text([{}], {x: p.E / 2, y: p.N / 2, text: () => text, fill: color, fontSize: 11, fontWeight: "bold",
+                       stroke: "white", strokeWidth: 4, ...opts})
+    ];
+    const label = (x, y, text, opts) => Plot.text([{}], {x, y, text: () => text, fill: TOTAL_COLOR, fontSize: 11,
+                                                         fontWeight: "bold", stroke: "white", strokeWidth: 4, ...opts});
+    return [
+      Plot.rect([{}], {x1: -g.Edep, x2: g.Edep, y1: -g.Elat, y2: g.Elat, fill: TOTAL_COLOR, fillOpacity: 0.08,
+                       stroke: TOTAL_COLOR, strokeDasharray: "4,3"}),
+      // Box labels outside its left and bottom edges, clear of the ellipse's axes and E_P
+      label(-g.Edep, g.Elat / 2, `E_Lat ${len(g.Elat)}`, {textAnchor: "end", dx: -6}),
+      label(g.Edep / 2, -g.Elat, `E_Dep ${len(g.Edep)}`, {dy: 12}),
+      Plot.line(ellipse, {x: "E", y: "N", stroke: "crimson", strokeWidth: 2}),
+      ...axis({E: g.along * g.u.E, N: g.along * g.u.N}, DIST_COLOR, `E_d ${len(g.along)}`, {dx: 8, textAnchor: "start"}),
+      ...axis({E: g.across * g.v.E, N: g.across * g.v.N}, ANG_COLOR, `D·E_a ${len(g.across)}`, {dx: 8, textAnchor: "start"}),
+      Plot.link([{}], {x1: 0, y1: 0, x2: g.Edep, y2: g.Elat, stroke: TOTAL_COLOR, strokeWidth: 2, strokeDasharray: "6,3"}),
+      Plot.dot([{}], {x: g.Edep, y: g.Elat, r: 3, fill: TOTAL_COLOR}),
+      label(g.Edep, g.Elat, `E_P ${len(g.Epos)}`, {textAnchor: "start", dx: 6, dy: -6})
+    ];
   });
 }
 
@@ -538,6 +664,23 @@ viewof instrument = instrumentEditor("Instrument Specifications & Estimated Erro
 
 # Errors
 
+The diagrams in this section zoom in on the end station of one line, where its errors are at true scale. Choose the line here:
+
+```{ojs}
+//| echo: false
+// Keep the chosen line when the traverse or instrument changes (`this` is the previous picker)
+viewof focusLine = Inputs.select(lineErrs.map((_, i) => i), {
+  label: "Line",
+  value: Math.min(this?.value ?? 0, lineErrs.length - 1),
+  format: i => `${lineErrs[i].from} → ${lineErrs[i].to}`
+})
+```
+
+```{ojs}
+//| echo: false
+focus = lineErrs[focusLine]
+```
+
 ## Foresight Distance Errors
 
 From the equation for EDM distance error [@ghilani2022, eq. 6.15],
@@ -568,7 +711,8 @@ texTable(distErrors, [
 
 The foresight azimuth or angular error $E_a$ is the combination of instrument reading and pointing error as well
 as the angular effect of the instrument and target centering errors.
-We combine them using the root sum of squares, using the form of equation 3.11 [@ghilani2022] since all four errors have different magnitudes:
+We combine them using the root sum of squares, using the form of equation 3.11 [@ghilani2022] since all four errors have different magnitudes.
+Then,
 
 $$E_a = \sqrt{E_r^2 + E_p^2 + E_{a_i}^2 + E_{a_t}^2}$$
 
@@ -686,6 +830,11 @@ texTable(lineErrs, [
 ])
 ```
 
+```{ojs}
+//| echo: false
+componentPlot(focus, "N", Math.min(width, 640))
+```
+
 ### Error in Departure
 
 Likewise for each leg's departure $D \sin Az$
@@ -706,6 +855,11 @@ texTable(lineErrs, [
 ])
 ```
 
+```{ojs}
+//| echo: false
+componentPlot(focus, "E", Math.min(width, 640))
+```
+
 ## Error in Position
 
 Finally, the latitude and departure errors are combined by root sum of squares to give the error in position, $E_p$,
@@ -721,5 +875,16 @@ texTable(lineErrs, [
   {head: "E_{\\text{Dep}}", cell: e => e.Edep.toFixed(5)},
   {head: "E_P", cell: e => e.Epos.toFixed(5), total: true}
 ])
+```
+
+Plotting the latitude and departure errors together shows where the end station could plausibly be.
+The angular error moves it across the line and the distance error moves it along the line, so the region is an ellipse aligned with the line,
+with semi-axes $E_d$ and $D \cdot E_a$. $E_{\text{Lat}}$ and $E_{\text{Dep}}$ are how far that ellipse extends north–south and east–west,
+so it just fits the box they make, and $E_P$ is the half-diagonal of that box.
+The ellipse's largest radius is shorter than $E_P$ unless the line runs exactly north–south or east–west.
+
+```{ojs}
+//| echo: false
+ellipsePlot(focus, Math.min(width, 640))
 ```
 
