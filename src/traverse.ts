@@ -38,6 +38,8 @@ export interface TraverseRow extends DMS {
   station: string;
   /** Foresight distance to the next station. */
   dist: number;
+  /** Azimuth of the line to the next station, as entered. Used only when azimuths aren't locked, and not on the first row (see startAz). */
+  az?: DMS;
 }
 
 export interface Traverse {
@@ -45,6 +47,11 @@ export interface Traverse {
   startAz: DMS;
   /** One row per station; the last station's foresight goes back to station 1. */
   rows: TraverseRow[];
+  /**
+   * Whether each line's azimuth is carried from the previous one by the angle turned (the default),
+   * or taken from the rows' entered azimuths.
+   */
+  lockAzimuths?: boolean;
 }
 
 // ---- Output shapes -----------------------------------------------------------
@@ -70,8 +77,13 @@ export interface Geometry {
   n: number;
   /** Interior angle at each station. */
   angles: Degrees[];
-  /** Azimuth of each line, station i → station i + 1. */
+  /** Azimuth of each line, station i → station i + 1: carried from the angles, or as entered when unlocked. */
   azimuths: Degrees[];
+  /**
+   * At each station, the outgoing line's azimuth minus the one implied by the incoming line's azimuth and the
+   * angle turned, in (−180°, 180°]. Zero after station 1 when azimuths are locked; at station 1 it closes the loop.
+   */
+  azimuthDiffs: Degrees[];
   /** n + 1 points: the stations in order, then the computed return to station 1. */
   points: Point[];
 }
@@ -105,6 +117,12 @@ export function degreesToDms(a: Degrees, secDecimals = 4): DMS {
   const min = Math.floor((total - d * 3600) / 60);
   const sec = Math.round((total - d * 3600 - min * 60) * scale) / scale;
   return { deg: d, min, sec };
+}
+
+/** An angle wrapped to [0°, 360°) as a valid D/M/S entry: one just under 360° can round up to 360°00′00″, so wrap that too. */
+export function entryDms(a: Degrees): DMS {
+  const d = degreesToDms(norm360(a));
+  return d.deg >= 360 ? { ...d, deg: d.deg - 360 } : d;
 }
 
 /** Wrap an angle into [0°, 360°). */
@@ -172,23 +190,41 @@ export function parseTraverse(value: unknown): Traverse {
   if (!isObj(value)) return fail("expected an object with startAz and rows");
   if (!Array.isArray(value.rows)) return fail("rows must be an array");
   if (value.rows.length < 3) fail("a closed traverse needs at least 3 stations");
+  if (value.lockAzimuths !== undefined && typeof value.lockAzimuths !== "boolean") fail("lockAzimuths must be true or false");
+  const locked = value.lockAzimuths !== false;
   const rows = value.rows.map((r: unknown, i: number): TraverseRow => {
     const where = `rows[${i}]`;
     if (!isObj(r)) return fail(`${where} must be an object`);
     const distance = num(r.dist, `${where}.dist`);
     if (distance <= 0) fail(`${where}.dist must be positive`);
-    return { station: String(r.station ?? ""), ...dms(r, where), dist: distance };
+    const row: TraverseRow = { station: String(r.station ?? ""), ...dms(r, where), dist: distance };
+    // Entered azimuths are only read when unlocked; the first line's is startAz
+    if (!locked && i > 0) row.az = dms(r.az, `${where}.az`);
+    return row;
   });
-  return { startAz: dms(value.startAz, "startAz"), rows };
+  const t: Traverse = { startAz: dms(value.startAz, "startAz"), rows };
+  if (!locked) t.lockAzimuths = false;
+  return t;
 }
 
-/** Carry azimuths around the traverse from the first line, and compute station coordinates from ORIGIN. */
-export function traverseGeometry({ rows, startAz }: Traverse): Geometry {
+/**
+ * Carry azimuths around the traverse from the first line (or take them as entered, when unlocked),
+ * and compute station coordinates from ORIGIN.
+ */
+export function traverseGeometry({ rows, startAz, lockAzimuths = true }: Traverse): Geometry {
   const n = rows.length;
   const angles = rows.map(dmsToDegrees);
 
   const azimuths = [norm360(dmsToDegrees(startAz))];
-  for (let i = 1; i < n; i++) azimuths.push(forwardAzimuth(azimuths[i - 1]!, angles[i]!));
+  for (let i = 1; i < n; i++) {
+    const entered = rows[i]!.az;
+    if (!lockAzimuths && !entered) throw new TypeError(`Azimuths are unlocked but row ${i} has none`);
+    azimuths.push(lockAzimuths ? forwardAzimuth(azimuths[i - 1]!, angles[i]!) : norm360(dmsToDegrees(entered!)));
+  }
+  const azimuthDiffs = azimuths.map((az, i) => {
+    const d = norm360(deg(az - forwardAzimuth(azimuths[(i - 1 + n) % n]!, angles[i]!)));
+    return deg(d > 180 ? d - 360 : d);
+  });
 
   const points: Point[] = [{ station: rows[0]!.station, ...ORIGIN }];
   rows.forEach((r, i) => {
@@ -200,7 +236,7 @@ export function traverseGeometry({ rows, startAz }: Traverse): Geometry {
       E: dist(prev.E + r.dist * sin(a)),
     });
   });
-  return { n, angles, azimuths, points };
+  return { n, angles, azimuths, azimuthDiffs, points };
 }
 
 /** Geometry plus per-line latitudes/departures and the angular and linear closure. */
@@ -228,26 +264,22 @@ export function analyzeTraverse(t: Traverse): Analysis {
 }
 
 /**
- * Recompute the last line so it ends exactly on station 1: its distance, the angle at the last
- * station (which sets its azimuth), and the angle at station 1 (so the angles sum to (n − 2)·180°).
+ * Lock the azimuths to the angles, then recompute the last line so it ends exactly on station 1: its distance,
+ * the angle at the last station (which sets its azimuth), and the angle at station 1 (so the angles sum to
+ * (n − 2)·180°). Locking discards any entered azimuths except the first line's: the angles are what's kept.
  * Seconds are kept to 1e-4″ and the distance to 1e-6, so the result closes to within about 1e-5.
  * Returns a new traverse; the input is not modified.
  */
 export function closeTraverse(t: Traverse): Traverse {
-  const { n, azimuths, points } = traverseGeometry(t);
+  const rows = t.rows.map(({ az: _, ...r }) => r);
+  const locked: Traverse = { startAz: { ...t.startAz }, rows };
+  const { n, azimuths, points } = traverseGeometry(locked);
   const last = points[n - 1]!, first = points[0]!;
   const azLast = azimuthBetween(last, first);
 
-  // An angle just under 360° can round up to 360°00′00″; wrap it so it stays a valid entry
-  const angleDms = (a: Degrees): DMS => {
-    const d = degreesToDms(norm360(a));
-    return d.deg >= 360 ? { ...d, deg: d.deg - 360 } : d;
-  };
-
-  const rows = t.rows.map(r => ({ ...r }));
-  Object.assign(rows[n - 1]!, angleDms(deg(azLast - azimuths[n - 2]! - 180)), {
+  Object.assign(rows[n - 1]!, entryDms(deg(azLast - azimuths[n - 2]! - 180)), {
     dist: Math.round(Math.hypot(first.N - last.N, first.E - last.E) * 1e6) / 1e6,
   });
-  Object.assign(rows[0]!, angleDms(deg(dmsToDegrees(t.startAz) - azLast - 180)));
-  return { startAz: { ...t.startAz }, rows };
+  Object.assign(rows[0]!, entryDms(deg(dmsToDegrees(t.startAz) - azLast - 180)));
+  return locked;
 }

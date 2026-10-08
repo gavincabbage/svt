@@ -1,0 +1,4 @@
+Example,EDM Constant Error (USF),EDM Scalar Error (PPM),Instrument Centering Error (USF),Target Centering Error (USF),Reading Error (Seconds),Pointing Error (Seconds),Direct and Reversed Reading #
+Lecture Example,0.003280833333,2,0.0033,0.0033,2,2,4
+HW5 Problem 1,0.006561666667,4,0.0066,0.0099,6,4,4
+HW5 Problem 2,0.006561666667,4,0.0066,0.0099,6,4,4

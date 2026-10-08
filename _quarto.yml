@@ -8,7 +8,7 @@ project:
     - /js/*.js
 
 website:
-  title: "Surveying Notebooks"
+  title: "Surveying Engineering Technology"
   site-url: https://gavincabbage.github.io/svt/
   repo-url: https://github.com/gavincabbage/svt
   navbar:

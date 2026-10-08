@@ -311,6 +311,36 @@ describe("lineErrors", () => {
       assert.deepEqual({ ...l }, { ...l, ...latDepError(l.azimuth, l.D, l.Ea, l.Ed) });
     });
   });
+
+  it("reproduces traverse.xlsx's Traverse 2 using its entered azimuths", () => {
+    // Its entered azimuths disagree with its angles by 1″, so this only matches with azimuths unlocked
+    const t: Traverse = {
+      startAz: { deg: 95, min: 5, sec: 2 },
+      lockAzimuths: false,
+      rows: [
+        { station: "1", deg: 119, min: 19, sec: 36, dist: 309.62 },
+        { station: "2", deg: 90, min: 45, sec: 40, dist: 433.43, az: { deg: 5, min: 50, sec: 43 } },
+        { station: "3", deg: 72, min: 44, sec: 46, dist: 499.71, az: { deg: 258, min: 35, sec: 29 } },
+        { station: "4", deg: 77, min: 9, sec: 58, dist: 334.38, az: { deg: 155, min: 45, sec: 27 } },
+      ],
+    };
+    const spec = parseInstrument({
+      edmConstant: 2 * 3937 / 1200 / 1000, edmScalar: 4, instrumentCentering: 0.0066, targetCentering: 0.0099,
+      readingError: 6, pointingError: 4, drReadings: 4,
+    });
+    // Columns G (latitude) and G (departure) and B (position) of the sheet's error tables
+    const excel = [
+      { Elat: 0.01645819728067363, Edep: 0.013668615864026299, Epos: 0.02139400190165188, depDist: -0.013590345475279264 },
+      { Elat: 0.013782892253242852, Edep: 0.020258650261345396, Epos: 0.02450267392094201, depDist: -0.001395023421913777 },
+      { Elat: 0.01828894631797934, Edep: 0.013948401152104585, Epos: 0.02300094459195019, depDist: 0.01346256746853669 },
+      { Elat: 0.013743724393348413, Edep: 0.014094020206809504, Epos: 0.019685816360778, depDist: -0.00560606564107502 },
+    ];
+    lineErrors(t, spec).forEach((l, i) => {
+      for (const [key, value] of Object.entries(excel[i]!)) {
+        assertClose(l[key as keyof typeof excel[0]], value, 1e-9, `line ${l.from}→${l.to} ${key}`);
+      }
+    });
+  });
 });
 
 // Compile-time unit checks (never run; see traverse.test.ts)

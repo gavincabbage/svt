@@ -36,7 +36,7 @@ function seeded(seed: number) {
   };
 }
 
-// The field data in traverse.csv
+// The field data in lecture-example.csv
 const CSV: Traverse = {
   startAz: dms(82, 47, 55),
   rows: [
@@ -44,6 +44,19 @@ const CSV: Traverse = {
     row("2", dms(93, 53, 19), 332.77),
     row("3", dms(84, 15, 2), 379.12),
     row("4", dms(74, 49, 10), 334.38),
+  ],
+};
+
+// Traverse 2 in traverse.xlsx (HW5 Problem 2 on the page), with its azimuths as entered. The entered azimuth of
+// line 2 → 3 is 1″ more than the angles give, so they disagree by +1″ at station 2 and −1″ at station 1.
+const ENTERED: Traverse = {
+  startAz: dms(95, 5, 2),
+  lockAzimuths: false,
+  rows: [
+    row("1", dms(119, 19, 36), 309.62),
+    { ...row("2", dms(90, 45, 40), 433.43), az: dms(5, 50, 43) },
+    { ...row("3", dms(72, 44, 46), 499.71), az: dms(258, 35, 29) },
+    { ...row("4", dms(77, 9, 58), 334.38), az: dms(155, 45, 27) },
   ],
 };
 
@@ -168,6 +181,33 @@ describe("traverseGeometry", () => {
     assert.deepEqual(points.map(p => p.station), ["1", "2", "3", "4", "1"]);
   });
 
+  it("uses entered azimuths when unlocked", () => {
+    const { azimuths } = traverseGeometry(ENTERED);
+    const expected = [ENTERED.startAz, ...ENTERED.rows.slice(1).map(r => r.az!)];
+    azimuths.forEach((az, i) => assertClose(az, dmsToDegrees(expected[i]!), 1e-9, `line ${i + 1}`));
+  });
+
+  it("ignores entered azimuths when locked", () => {
+    const locked = traverseGeometry({ ...ENTERED, lockAzimuths: true });
+    assertClose(locked.azimuths[1]!, dmsToDegrees(dms(5, 50, 42)), 1e-9);
+  });
+
+  it("finds where entered azimuths disagree with the angles", () => {
+    const { azimuthDiffs } = traverseGeometry(ENTERED);
+    [-1, 1, 0, 0].forEach((s, i) => assertClose(azimuthDiffs[i]!, s * ARCSEC, 1e-9, `station ${i + 1}`));
+  });
+
+  it("shows the angular misclosure as the only disagreement when locked", () => {
+    const { azimuthDiffs } = traverseGeometry(CSV);
+    assertClose(azimuthDiffs[0]!, -analyzeTraverse(CSV).angularError, 1e-9);
+    azimuthDiffs.slice(1).forEach((d, i) => assertClose(d, 0, 1e-9, `station ${i + 2}`));
+  });
+
+  it("refuses unlocked azimuths that are missing", () => {
+    const t = { ...ENTERED, rows: ENTERED.rows.map(({ az: _, ...r }) => r) };
+    assert.throws(() => traverseGeometry(t), /row 1 has none/);
+  });
+
   it("walks a square exactly: north, west, south, east", () => {
     const { points } = traverseGeometry(regularPolygon(4, 100, dms(0, 0, 0)));
     const expected = [[1000, 1000], [1100, 1000], [1100, 900], [1000, 900], [1000, 1000]];
@@ -248,9 +288,23 @@ describe("closeTraverse", () => {
   });
 
   it("doesn't modify its input", () => {
-    const before = structuredClone(CSV);
-    closeTraverse(CSV);
-    assert.deepEqual(CSV, before);
+    for (const t of [CSV, ENTERED]) {
+      const before = structuredClone(t);
+      closeTraverse(t);
+      assert.deepEqual(t, before);
+    }
+  });
+
+  it("locks unlocked traverses to their angles before closing", () => {
+    const closed = closeTraverse(ENTERED);
+    assert.equal(closed.lockAzimuths, undefined);
+    assert.ok(closed.rows.every(r => r.az === undefined), "entered azimuths are discarded");
+    assert.deepEqual(closed, closeTraverse({ ...ENTERED, lockAzimuths: true }));
+    const a = analyzeTraverse(closed);
+    assert.ok(a.misclosure < 1e-5, `misclosure ${a.misclosure}`);
+    assertClose(a.angularError, 0, 1e-7);
+    // Line 2 → 3 now follows the angles, not its entered 5°50′43″
+    assertClose(a.azimuths[1]!, dmsToDegrees(dms(5, 50, 42)), 1e-9);
   });
 
   it("closes realistic traverses with field errors and leaves valid entries", () => {
@@ -296,7 +350,16 @@ describe("parseTraverse", () => {
     assert.deepEqual(parsed, CSV);
   });
 
+  it("keeps entered azimuths only when unlocked", () => {
+    assert.deepEqual(parseTraverse(ENTERED), ENTERED);
+    assert.deepEqual(parseTraverse({ ...ENTERED, lockAzimuths: true }),
+      { startAz: ENTERED.startAz, rows: ENTERED.rows.map(({ az: _, ...r }) => r) });
+  });
+
   const bad: [string, unknown, RegExp][] = [
+    ["non-boolean lockAzimuths", { ...CSV, lockAzimuths: "no" }, /lockAzimuths must be true or false/],
+    ["unlocked without azimuths", { ...CSV, lockAzimuths: false }, /rows\[1\]\.az must be an object/],
+    ["unlocked with a bad azimuth", { ...ENTERED, rows: [...ENTERED.rows.slice(0, 3), { ...ENTERED.rows[3], az: dms(360, 0, 0) }] }, /rows\[3\]\.az\.deg/],
     ["non-object", 42, /expected an object/],
     ["missing rows", { startAz: CSV.startAz }, /rows must be an array/],
     ["two stations", { ...CSV, rows: CSV.rows.slice(0, 2) }, /at least 3 stations/],

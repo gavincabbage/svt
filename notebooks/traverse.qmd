@@ -11,51 +11,87 @@ bibliography: ../references.bib
 
 ::: {.callout-warning title="No propagation between courses"}
 This page currently models propagation of each leg of the traverse independently. It does not carry
-forward errors from through subsequent courses extending away from any control points.
+forward errors through subsequent courses extending away from any control points.
 :::
 
 
 # Field Data
 
 ```{python}
-#| code-summary: "Load default data"
+#| code-summary: "Load sample data"
 import csv
 
-# Column names repeat ("Minutes", "Seconds"), so look columns up by first occurrence.
-with open("traverse.csv", newline="") as f:
-    reader = csv.reader(f)
-    header = next(reader)
-    rows = [r for r in reader if r]
+def load_traverse(path):
+    # Column names repeat ("Minutes", "Seconds"), so look columns up by first occurrence.
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = [r for r in reader if r]
 
-col = {name: i for i, name in reversed(list(enumerate(header)))}
+    col = {name: i for i, name in reversed(list(enumerate(header)))}
 
-def dms_from(row, deg_col):
-    i = col[deg_col]  # minutes and seconds follow the degrees column
-    return {"deg": float(row[i]), "min": float(row[i + 1]), "sec": float(row[i + 2])}
+    def dms_from(row, deg_col):
+        i = col[deg_col]  # minutes and seconds follow the degrees column
+        return {"deg": float(row[i]), "min": float(row[i + 1]), "sec": float(row[i + 2])}
 
-traverse_rows = [
-    {
-        "station": row[col["Station"]],
-        **dms_from(row, "Angle Degrees"),
-        "dist": float(row[col["Foresight Distance"]]),
+    traverse_rows = [
+        {
+            "station": row[col["Station"]],
+            **dms_from(row, "Angle Degrees"),
+            "dist": float(row[col["Foresight Distance"]]),
+            # The first line's azimuth is the starting azimuth
+            **({"az": dms_from(row, "Forward Azimuth Degrees")} if i > 0 else {}),
+        }
+        for i, row in enumerate(rows)
+    ]
+    # Samples keep their azimuths as entered, so the page reproduces the spreadsheet they came from
+    return {"startAz": dms_from(rows[0], "Forward Azimuth Degrees"), "rows": traverse_rows, "lockAzimuths": False}
+
+# Each sample's instrument specifications, in the instrument editor's stored units (USF and seconds)
+instrument_keys = {
+    "EDM Constant Error (USF)": "edmConstant",
+    "EDM Scalar Error (PPM)": "edmScalar",
+    "Instrument Centering Error (USF)": "instrumentCentering",
+    "Target Centering Error (USF)": "targetCentering",
+    "Reading Error (Seconds)": "readingError",
+    "Pointing Error (Seconds)": "pointingError",
+    "Direct and Reversed Reading #": "drReadings",
+}
+with open("instruments.csv", newline="") as f:
+    instruments = {
+        row["Example"]: {key: float(row[name]) for name, key in instrument_keys.items()}
+        for row in csv.DictReader(f)
     }
-    for row in rows
-]
-start_azimuth = dms_from(rows[0], "Forward Azimuth Degrees")
 
-ojs_define(csvRows=traverse_rows, csvStartAz=start_azimuth)
+# The first is the page's default
+examples = [
+    {"name": name, "traverse": load_traverse(path), "instrument": instruments[name]}
+    for name, path in [
+        ("Lecture Example", "lecture-example.csv"),
+        ("HW5 Problem 1", "hw5-problem-1.csv"),
+        ("HW5 Problem 2", "hw5-problem-2.csv"),
+    ]
+]
+
+ojs_define(examples=examples)
 ```
 
-Edit the interior angles (turned to the right), foresight distances, or initial azimuth.
+Choose a sample traverse, then edit the interior angles (turned to the right), azimuths, or foresight distances.
+Each sample also sets the instrument specifications below.
+
+With azimuths locked, only the first line's azimuth is entered and the rest are carried from it by the angles.
+Unlock them to enter every azimuth, as the samples do; each station then shows how far its azimuth disagrees with its angle.
 
 Subsequent azimuths, station positions, and closure update as you type.
 
 ```{ojs}
 //| echo: false
-viewof traverse = traverseEditor({
-  startAz: csvStartAz,
-  rows: csvRows
-})
+viewof example = picker(Inputs.select(examples, {label: "Sample traverse", format: e => e.name}))
+```
+
+```{ojs}
+//| echo: false
+viewof traverse = traverseEditor(example.traverse)
 ```
 
 ```{ojs}
@@ -63,6 +99,7 @@ viewof traverse = traverseEditor({
 html`<div class="closure-stats">
   ${stat("Angular misclosure", fmtSigned(result.angularError), `Σ angles ${formatDms(result.angleSum)} vs ${(result.n - 2) * 180}°`)}
   ${stat("Linear misclosure (unbalanced)", result.misclosure.toFixed(3), `ΔN ${signed(result.errN)} · ΔE ${signed(result.errE)}`)}
+  ${trav.lockAzimuths === false ? azimuthStat(result) : ""}
 </div>`
 ```
 
@@ -75,7 +112,7 @@ traversePlot(result, Math.min(width, 760))
 //| echo: false
 html`<table class="lines-table">
   <thead><tr>
-    <th>Line</th><th class="num">Interior angle. </th><th class="num">Azimuth</th>
+    <th>Line</th><th class="num">Interior angle</th><th class="num">Azimuth</th>
     <th class="num">Distance</th><th class="num">Latitude</th><th class="num">Departure</th>
   </tr></thead>
   <tbody>${result.lines.map(l => html`<tr>
@@ -90,7 +127,7 @@ html`<table class="lines-table">
 // ---- Computation -----------------------------------------------------------
 // The math lives in src/traverse.ts (tested with `npm test`), compiled to js/traverse.js.
 
-import {analyzeTraverse, closeTraverse, parseTraverse, formatDms, formatAzimuth} from "../js/traverse.js"
+import {analyzeTraverse, closeTraverse, parseTraverse, traverseGeometry, entryDms, formatDms, formatAzimuth} from "../js/traverse.js"
 import {parseInstrument, ANGLE_UNITS, LENGTH_UNITS} from "../js/instrument.js"
 import {distanceErrors, readingPointingError, centeringErrors, lineErrors} from "../js/errors.js"
 ```
@@ -106,6 +143,13 @@ centErrors = centeringErrors(trav, spec)
 lineErrs = lineErrors(trav, spec)
 
 fmtSigned = a => (a >= 0 ? "+" : "") + formatDms(a)
+// Signed, leaving out leading zero units: "+1″", "−1′05″", "+2°00′10″"
+fmtCompact = a => {
+  const t = Math.round(Math.abs(a) * 3600), d = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+  const pad = v => String(v).padStart(2, "0");
+  const body = d ? `${d}°${pad(m)}′${pad(s)}″` : m ? `${m}′${pad(s)}″` : `${s}″`;
+  return (t === 0 ? "" : a < 0 ? "−" : "+") + body;
+}
 signed = v => (Math.round(v * 1000) >= 0 ? "+" : "−") + Math.abs(v).toFixed(3)  // no "−0.000"
 ```
 
@@ -194,6 +238,7 @@ function errorGeometry(e) {
 len = v => Math.abs(v).toFixed(5)
 
 // Equal-scale plot centred on the line's end station, showing the line coming in. `marks(g, frame)` adds the rest.
+// `caption` is an element whose \\( … \\) math is typeset like the document's equations.
 function zoomPlot(e, w, caption, marks) {
   const g = errorGeometry(e);
   const h = Math.round(w * 0.75);
@@ -210,8 +255,8 @@ function zoomPlot(e, w, caption, marks) {
   if (rot < -90) rot += 180;
   const lineLabel = {E: -0.75 * R * g.u.E, N: -0.75 * R * g.u.N, rot, text: `line ${e.from} → ${e.to}`};
 
-  return Plot.plot({
-    width: w, height: h, caption,
+  const plot = Plot.plot({
+    width: w, height: h,
     marginTop: margin.top, marginRight: margin.right, marginBottom: margin.bottom, marginLeft: margin.left,
     x: {domain: frame.x, label: "ΔE (USF)", grid: true},
     y: {domain: frame.y, label: "ΔN (USF)", grid: true},
@@ -226,13 +271,20 @@ function zoomPlot(e, w, caption, marks) {
                        stroke: "white", strokeWidth: 4, fill: "currentColor"})
     ]
   });
+  const figure = html`<figure class="zoom-figure">${plot}<figcaption>${caption}</figcaption></figure>`;
+  typeset(figure);
+  return figure;
 }
 
 // Latitude (axis "N") or departure (axis "E") error: the end station's moves under E_a and E_d,
 // their components along the axis, and the combined ± band.
 function componentPlot(e, axis, w) {
   const isN = axis === "N", name = isN ? "Lat" : "Dep";
-  const caption = `Line ${e.from} → ${e.to}: the end station moved by +E_a and +E_d separately. Their ${isN ? "north–south" : "east–west"} components are the ${isN ? "latitude" : "departure"} errors E_${name},a and E_${name},d; the band is ±E_${name}.`;
+  // Diagram labels can't be typeset, so give the plain-text form of the ones with nested subscripts
+  const sub = c => `\\(E_{\\text{${name}}_${c}}\\)`;
+  const caption = html`<span>Line ${e.from} → ${e.to}: the end station moved by \\(+E_a\\) and \\(+E_d\\) separately.
+    Their ${isN ? "north–south" : "east–west"} components are the ${isN ? "latitude" : "departure"} errors
+    ${sub("a")} (<code>E_${name},a</code>) and ${sub("d")} (<code>E_${name},d</code>); the band is \\(\\pm E_{\\text{${name}}}\\).</span>`;
   return zoomPlot(e, w, caption, (g, f) => {
     const total = isN ? g.Elat : g.Edep;
     const comps = [{p: g.ang, color: ANG_COLOR, text: `E_${name},a ${len(isN ? g.ang.N : g.ang.E)}`},
@@ -265,9 +317,10 @@ function componentPlot(e, axis, w) {
 }
 
 // Position error: the ellipse with semi-axes E_d along the line and D·E_a across it, its E_Dep × E_Lat
-// bounding box, and E_P as the box's half-diagonal.
+// bounding box, and E_Pos as the box's half-diagonal.
 function ellipsePlot(e, w) {
-  const caption = `Line ${e.from} → ${e.to}: the error ellipse has semi-axes E_d along the line and D·E_a across it. It just fits the ±E_Dep × ±E_Lat box, and E_P is the box's half-diagonal.`;
+  const caption = html`<span>Line ${e.from} → ${e.to}: the error ellipse has semi-axes \\(E_d\\) along the line and \\(D \\cdot E_a\\) across it.
+    It just fits the \\(\\pm E_{\\text{Dep}} \\times \\pm E_{\\text{Lat}}\\) box, and \\(E_{\\text{Pos}}\\) is the box's half-diagonal.</span>`;
   return zoomPlot(e, w, caption, g => {
     const ellipse = Array.from({length: 121}, (_, i) => {
       const t = 2 * Math.PI * i / 120, c = g.along * Math.cos(t), s = g.across * Math.sin(t);
@@ -283,7 +336,7 @@ function ellipsePlot(e, w) {
     return [
       Plot.rect([{}], {x1: -g.Edep, x2: g.Edep, y1: -g.Elat, y2: g.Elat, fill: TOTAL_COLOR, fillOpacity: 0.08,
                        stroke: TOTAL_COLOR, strokeDasharray: "4,3"}),
-      // Box labels outside its left and bottom edges, clear of the ellipse's axes and E_P
+      // Box labels outside its left and bottom edges, clear of the ellipse's axes and E_Pos
       label(-g.Edep, g.Elat / 2, `E_Lat ${len(g.Elat)}`, {textAnchor: "end", dx: -6}),
       label(g.Edep / 2, -g.Elat, `E_Dep ${len(g.Edep)}`, {dy: 12}),
       Plot.line(ellipse, {x: "E", y: "N", stroke: "crimson", strokeWidth: 2}),
@@ -291,16 +344,24 @@ function ellipsePlot(e, w) {
       ...axis({E: g.across * g.v.E, N: g.across * g.v.N}, ANG_COLOR, `D·E_a ${len(g.across)}`, {dx: 8, textAnchor: "start"}),
       Plot.link([{}], {x1: 0, y1: 0, x2: g.Edep, y2: g.Elat, stroke: TOTAL_COLOR, strokeWidth: 2, strokeDasharray: "6,3"}),
       Plot.dot([{}], {x: g.Edep, y: g.Elat, r: 3, fill: TOTAL_COLOR}),
-      label(g.Edep, g.Elat, `E_P ${len(g.Epos)}`, {textAnchor: "start", dx: 6, dy: -6})
+      label(g.Edep, g.Elat, `E_Pos ${len(g.Epos)}`, {textAnchor: "start", dx: 6, dy: -6})
     ];
   });
 }
 
 // Typeset \\( … \\) math in an element produced by a cell, waiting for MathJax to finish loading
+// and for the cell to put the element on the page: MathJax quietly skips detached elements.
+// Polled rather than waiting for "load", which may already have fired; an element replaced before
+// it's ever shown is given up on after a few seconds.
 function typeset(el) {
-  const run = () => window.MathJax?.startup?.promise?.then(() => MathJax.typesetPromise([el]));
-  if (window.MathJax?.typesetPromise) run();
-  else window.addEventListener("load", run, {once: true});
+  const ready = () => el.isConnected && window.MathJax?.startup?.promise && window.MathJax.typesetPromise;
+  const run = () => MathJax.startup.promise.then(() => MathJax.typesetPromise([el]));
+  if (ready()) return run();
+  let tries = 0;
+  const poll = setInterval(() => {
+    if (ready()) { clearInterval(poll); run(); }
+    else if (++tries > 200) clearInterval(poll);
+  }, 50);
 }
 
 // Compact table with one row per line. `columns` is [{head, cell, total?}], where head is TeX
@@ -314,6 +375,21 @@ function texTable(rows, columns) {
   </table>`;
   typeset(table);
   return html`<div class="table-scroll">${table}</div>`;
+}
+
+// With azimuths entered, the largest disagreement between an azimuth and the angle at its station
+function azimuthStat(res) {
+  const worst = res.azimuthDiffs.reduce((w, d, i) => Math.abs(d) > Math.abs(res.azimuthDiffs[w]) ? i : w, 0);
+  const d = res.azimuthDiffs[worst];
+  const note = Math.round(Math.abs(d) * 3600) > 0
+    ? `largest, at station ${res.points[worst].station}` : "every azimuth agrees with its angle";
+  return stat("Azimuths vs angles", fmtSigned(d), note);
+}
+
+// A select from Inputs.select in the page's picker style (see .picker below)
+function picker(select) {
+  select.classList.add("picker");
+  return select;
 }
 
 function stat(label, value, note) {
@@ -368,7 +444,30 @@ function traverseEditor(initial) {
   const root = document.createElement("div");
   root.className = "trav-editor";
 
+  // Cells that follow the azimuths as you type, without rebuilding the table: computed azimuths
+  // (locked) and each station's disagreement between its entered azimuth and its angle (unlocked)
+  let liveAz = [], liveDiff = [];
+  const refresh = () => {
+    let g;
+    try { g = traverseGeometry(state); } catch { return; }
+    liveAz.forEach((el, i) => { if (el) el.textContent = formatAzimuth(g.azimuths[i]); });
+    liveDiff.forEach((el, i) => {
+      const d = g.azimuthDiffs[i], off = Math.round(Math.abs(d) * 3600) > 0;
+      const prev = (i - 1 + g.n) % g.n, from = state.rows[i].station;
+      const lineName = j => `${state.rows[j].station} → ${state.rows[(j + 1) % g.n].station}`;
+      el.textContent = off ? `Δ ${fmtCompact(d)}` : "agrees";
+      el.classList.toggle("off", off);
+      el.title = [
+        `Azimuth of line ${lineName(i)} as entered: ${formatAzimuth(g.azimuths[i])}`,
+        `From the angle: ${formatAzimuth(g.azimuths[prev])} (line ${lineName(prev)}) + 180° + ${formatDms(g.angles[i])} (angle at station ${from}) = ${formatAzimuth(g.azimuths[i] - d)}`,
+        off ? `They differ by ${fmtSigned(d)}` : "They agree",
+        ...(i === 0 ? ["At station 1 this also checks that the azimuths close around the loop."] : []),
+      ].join("\n");
+    });
+  };
+
   const emit = () => {
+    refresh();
     root.value = structuredClone(state);
     root.dispatchEvent(new Event("input", {bubbles: true}));
   };
@@ -383,7 +482,8 @@ function traverseEditor(initial) {
   </span>`;
 
   function render() {
-    const firstLine = `${state.rows[0].station} → ${state.rows[1].station}`;
+    const locked = state.lockAzimuths !== false;
+    liveAz = []; liveDiff = [];
 
     const body = state.rows.map((row, i) => {
       // Set disabled as a property: the html template writes disabled="false", which still disables
@@ -396,44 +496,74 @@ function traverseEditor(initial) {
         render(); emit();
       };
       // With the first line's azimuth held, the first station's angle only enters the closure check
-      const note = i === 0
+      const note = i === 0 && locked
         ? html`<span class="angle-note" title="The azimuth of the first line is fixed, so this angle doesn't move any lines. It only affects the angular misclosure.">closure check</span>`
         : "";
+      // The first line's azimuth is always entered; the rest are entered only when unlocked
+      let az;
+      if (i === 0) az = dmsField(state.startAz, "Starting azimuth");
+      else if (!locked) az = dmsField(row.az, `Azimuth of line ${row.station}`);
+      else az = liveAz[i] = html`<span class="dms-computed" title="Carried from the previous line's azimuth and this station's angle"></span>`;
+      const diff = locked ? "" : (liveDiff[i] = html`<span class="angle-note az-diff"></span>`);
       const dist = html`<span class="dist-field">${num(row, "dist", {min: 0, positive: true, step: 0.01, cls: "dist", minCh: 6, label: "Foresight distance"})}</span>`;
       return html`<tr><td class="station">${row.station}</td><td><span class="angle-cell">${dmsField(row, "Interior angle")}${note}</span></td>
-        <td>${dist}</td><td class="col-remove">${remove}</td></tr>`;
+        <td><span class="angle-cell">${az}${diff}</span></td><td>${dist}</td><td class="col-remove">${remove}</td></tr>`;
     });
+
+    const lock = html`<label class="lock-az"><input type="checkbox"> Lock azimuths to angles</label>`;
+    const box = lock.querySelector("input");
+    box.checked = locked;
+    // Unlocking starts the entered azimuths from the computed ones; locking discards them
+    box.onchange = () => {
+      if (box.checked) {
+        state.lockAzimuths = true;
+        state.rows.forEach(r => { delete r.az; });
+      } else {
+        const {azimuths} = traverseGeometry({...state, lockAzimuths: true});
+        state.rows.forEach((r, i) => { if (i > 0) r.az = entryDms(azimuths[i]); });
+        state.lockAzimuths = false;
+      }
+      render(); emit();
+    };
+    const lockNote = locked
+      ? "Each azimuth is carried from the line before by the angle turned."
+      : "Lines follow the azimuths as entered. The angles don't move any lines: they enter the angular misclosure and the angular errors.";
 
     const add = html`<button type="button" class="add">+ Add station</button>`;
     add.onclick = () => {
       const last = state.rows[state.rows.length - 1];
-      state.rows.push({station: String(state.rows.length + 1), deg: 180, min: 0, sec: 0, dist: last.dist});
+      // A 180° angle carries straight on, so an entered azimuth starts as the last line's
+      state.rows.push({station: String(state.rows.length + 1), deg: 180, min: 0, sec: 0, dist: last.dist,
+                       ...(locked ? {} : {az: {...last.az}})});
       render(); emit();
     };
-    const close = html`<button type="button" class="close-trav" title="Recompute the last line's distance and the angles at the last and first stations so the traverse closes exactly">Close traverse</button>`;
+    const close = html`<button type="button" class="close-trav">Close traverse</button>`;
+    close.title = "Lock the azimuths to the angles: every azimuth after the first line's is computed from the angles, "
+      + "and any entered azimuths are discarded. Then recompute the last line's distance and the angles at the last "
+      + "and first stations so the traverse closes exactly.";
     close.onclick = () => {
       state = closeTraverse(state);
       render(); emit();
       // Briefly highlight the fields that were recalculated
       const trs = root.querySelectorAll(".trav-table tbody tr");
       const changed = [trs[0].querySelector(".dms-field"), ...trs[trs.length - 1].querySelectorAll(".dms-field, .dist-field")];
+      if (!locked) changed.push(root.querySelector(".lock-az"));
       changed.forEach(el => el.classList.add("flash"));
     };
     const reset = html`<button type="button" class="reset">Reset to defaults</button>`;
     reset.onclick = () => { state = structuredClone(initial); render(); emit(); };
 
     root.replaceChildren(html`<div class="trav-card">
-      <div class="trav-head">
-        <span class="field-label">Azimuth of line ${firstLine}</span>
-        ${dmsField(state.startAz, "Starting azimuth")}
-      </div>
+      <div class="trav-toolbar"><span class="foot-group">${add}${close}</span>${reset}</div>
       <div class="trav-scroll"><table class="trav-table">
         <thead><tr><th>Station</th><th>Interior angle <span class="th-note">turned right</span></th>
+          <th>Azimuth <span class="th-note">to next station</span></th>
           <th>Foresight distance</th><th class="col-remove"></th></tr></thead>
         <tbody>${body}</tbody>
       </table></div>
-      <div class="trav-foot"><span class="foot-group">${add}${close}</span>${reset}</div>
+      <div class="trav-foot lock-foot">${lock}<span class="lock-note">${lockNote}</span></div>
     </div>`);
+    refresh();
   }
 
   render();
@@ -519,38 +649,57 @@ function instrumentEditor(title, fields, initial) {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
   padding: 0.75rem 1rem; background: var(--trav-subtle); border-bottom: 1px solid var(--trav-border);
 }
-.trav-foot {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 0.5rem 1rem; border-top: 1px solid var(--trav-border); background: var(--trav-subtle);
+.trav-foot, .trav-toolbar {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem 1rem; flex-wrap: wrap;
+  padding: 0.5rem 1rem; background: var(--trav-subtle);
 }
+.trav-foot { border-top: 1px solid var(--trav-border); }
+.trav-toolbar { border-bottom: 1px solid var(--trav-border); }
+/* The note wraps within its own space, to the right of the checkbox */
+.lock-foot { justify-content: flex-start; flex-wrap: nowrap; }
 /* Own button styles, specific enough to win over the btn-quarto class Quarto adds on load */
-.trav-editor .trav-foot button {
+.trav-editor :is(.trav-foot, .trav-toolbar) button {
   font: inherit; font-size: 0.875rem; border-radius: 6px; padding: 0.3rem 0.75rem; cursor: pointer;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.trav-editor .trav-foot button.add {
+.trav-editor :is(.trav-foot, .trav-toolbar) button.add {
   color: var(--trav-accent); background: var(--bs-body-bg, #fff); border: 1px solid var(--trav-accent);
 }
-.trav-editor .trav-foot button.add:hover { color: #fff; background: var(--trav-accent); }
-.trav-editor .trav-foot button.close-trav {
+.trav-editor :is(.trav-foot, .trav-toolbar) button.add:hover { color: #fff; background: var(--trav-accent); }
+.trav-editor :is(.trav-foot, .trav-toolbar) button.close-trav {
   color: var(--bs-body-color, #343a40); background: var(--bs-body-bg, #fff); border: 1px solid var(--trav-border);
 }
-.trav-editor .trav-foot button.close-trav:hover { border-color: var(--trav-accent); color: var(--trav-accent); }
+.trav-editor :is(.trav-foot, .trav-toolbar) button.close-trav:hover { border-color: var(--trav-accent); color: var(--trav-accent); }
 .foot-group { display: inline-flex; gap: 0.5rem; flex-wrap: wrap; }
 .trav-editor .flash { animation: trav-flash 1.6s ease-out; }
 @keyframes trav-flash {
   0%, 30% { background: color-mix(in srgb, var(--trav-accent) 22%, var(--bs-body-bg, #fff)); border-color: var(--trav-accent); }
 }
-.trav-editor .trav-foot button.reset { color: var(--trav-muted); background: none; border: 1px solid transparent; }
-.trav-editor .trav-foot button.reset:hover { color: var(--trav-accent); }
+.trav-editor :is(.trav-foot, .trav-toolbar) button.reset { color: var(--trav-muted); background: none; border: 1px solid transparent; }
+.trav-editor :is(.trav-foot, .trav-toolbar) button.reset:hover { color: var(--trav-accent); }
 .field-label, .trav-table th {
   font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--trav-muted);
 }
 .th-note { font-weight: 400; text-transform: none; letter-spacing: 0; }
+.lock-az { display: inline-flex; align-items: center; gap: 0.4rem; flex: none; white-space: nowrap; font-size: 0.9rem; font-weight: 600; cursor: pointer; margin: 0; }
+.lock-az input { accent-color: var(--trav-accent); }
+.lock-note { font-size: 0.8rem; color: var(--trav-muted); flex: 1; min-width: 0; }
+/* A computed azimuth, lined up with the entered ones */
+.dms-computed {
+  display: inline-block; padding: 0.25rem 0.6rem; border: 1px dashed var(--trav-border); border-radius: 6px;
+  color: var(--trav-muted); font-variant-numeric: tabular-nums;
+}
+.az-diff.off {
+  color: var(--trav-danger); border-style: solid;
+  border-color: color-mix(in srgb, var(--trav-danger) 50%, transparent);
+}
 .trav-scroll { overflow-x: auto; }
 .trav-table { width: 100%; border-collapse: collapse; }
-.trav-table th { text-align: left; padding: 0.6rem 1rem 0.4rem; border-bottom: 1px solid var(--trav-border); }
-.trav-table td { padding: 0.35rem 1rem; vertical-align: middle; }
+.trav-table th { text-align: left; padding: 0.6rem 0.5rem 0.4rem; border-bottom: 1px solid var(--trav-border); }
+.trav-table td { padding: 0.35rem 0.5rem; vertical-align: middle; }
+/* Tight between columns, but the outer edges line up with the bars above and below */
+.trav-table :is(th, td):first-child { padding-left: 1rem; }
+.trav-table :is(th, td):last-child { padding-right: 1rem; }
 .trav-table tbody tr + tr td { border-top: 1px solid var(--trav-border); }
 .trav-table tbody tr:hover { background: var(--trav-subtle); }
 .trav-table .col-remove { width: 1%; text-align: right; }
@@ -580,7 +729,7 @@ function instrumentEditor(title, fields, initial) {
 .dms-field .unit { color: var(--trav-muted); margin-right: 0.35rem; }
 .dms-field .unit:last-child { margin-right: 0; }
 
-.angle-cell { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.angle-cell { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
 .angle-note {
   font-size: 0.7rem; color: var(--trav-muted); cursor: help; white-space: nowrap;
   border: 1px dashed var(--trav-border); border-radius: 999px; padding: 0.05rem 0.5rem;
@@ -597,10 +746,32 @@ function instrumentEditor(title, fields, initial) {
 .trav-editor button.remove:disabled { opacity: 0.3; cursor: not-allowed; }
 
 @media (max-width: 600px) {
-  .trav-head, .trav-foot { padding-left: 0.6rem; padding-right: 0.6rem; }
+  .trav-head, .trav-foot, .trav-toolbar { padding-left: 0.6rem; padding-right: 0.6rem; }
   .trav-table th, .trav-table td { padding-left: 0.3rem; padding-right: 0.3rem; }
+  .trav-table :is(th, td):first-child { padding-left: 0.6rem; }
+  .trav-table :is(th, td):last-child { padding-right: 0.6rem; }
   .trav-editor button.remove { width: 1.6rem; height: 1.6rem; }
   .dms-field, .dist-field { padding: 0 0.35rem; }
+}
+
+/* Pickers: label styled like the editor's headings, select like its fields */
+form.picker { --label-width: auto; align-items: center; margin: 1rem 0 0.5rem; }
+form.picker > label {
+  white-space: nowrap; padding: 0; margin-right: 0.75rem; align-self: center;
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--bs-secondary-color, #6c757d);
+}
+form.picker > select {
+  width: auto; min-width: 12rem; font: inherit; font-weight: 600; color: inherit; cursor: pointer;
+  padding: 0.3rem 2rem 0.3rem 0.6rem; border: 1px solid var(--bs-border-color, #dee2e6); border-radius: 6px;
+  appearance: none; -webkit-appearance: none;
+  background: var(--bs-body-bg, #fff) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 0.7rem center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+form.picker > select:hover { border-color: var(--bs-primary, #2780e3); }
+form.picker > select:focus-visible {
+  outline: none; border-color: var(--bs-primary, #2780e3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bs-primary, #2780e3) 20%, transparent);
 }
 
 /* Instrument card */
@@ -623,6 +794,10 @@ function instrumentEditor(title, fields, initial) {
   background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E") no-repeat right 0.3rem center;
 }
 .inst-editor .unit-select:hover, .inst-editor .unit-select:focus-visible { color: var(--trav-accent); background-color: var(--trav-subtle); outline: none; }
+
+/* Zoomed error diagrams */
+.zoom-figure { margin: 0.5rem 0 1.5rem; }
+.zoom-figure figcaption { font-size: 0.9rem; color: var(--bs-secondary-color, #6c757d); margin-top: 0.25rem; }
 
 /* Lines table under the diagram: plain and compact */
 .lines-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-variant-numeric: tabular-nums; margin: 0.5rem 0 1rem; }
@@ -655,11 +830,7 @@ viewof instrument = instrumentEditor("Instrument Specifications & Estimated Erro
   {key: "pointingError",       label: "Pointing Error",             units: ANGLE_UNITS},
   {key: "drReadings",          label: "Direct and Reversed Readings", unit: "#", integer: true,
    note: "Total number of individual readings: count each direct and each reversed (2 sets = 4)"}
-], {
-  edmConstant: 0.003280833, edmScalar: 2,
-  instrumentCentering: 0.0033, targetCentering: 0.0033,
-  readingError: 2, pointingError: 2, drReadings: 4
-})
+], example.instrument)
 ```
 
 # Errors
@@ -669,11 +840,11 @@ The diagrams in this section zoom in on the end station of one line, where its e
 ```{ojs}
 //| echo: false
 // Keep the chosen line when the traverse or instrument changes (`this` is the previous picker)
-viewof focusLine = Inputs.select(lineErrs.map((_, i) => i), {
+viewof focusLine = picker(Inputs.select(lineErrs.map((_, i) => i), {
   label: "Line",
   value: Math.min(this?.value ?? 0, lineErrs.length - 1),
   format: i => `${lineErrs[i].from} → ${lineErrs[i].to}`
-})
+}))
 ```
 
 ```{ojs}
@@ -690,7 +861,7 @@ $$E_d = \sqrt{E_i^2 + E_t^2 + E_c^2 + (ppm \cdot D)^2}$$
 where $E_i$ is the instrument centering error,
 $E_t$ is the target centering error,
 $E_c$ the instrument constant error,
-$ppm$ the instrument's scalar error as a fraction of a million and
+$ppm$ the specified scalar error for the EDM and
 $D$ the measured distance,
 the foresight distance error $E_d$ for each leg of the traverse is computed as
 
@@ -752,7 +923,7 @@ Similarly, pointing error $E_p$ is computed as $E_p = \frac{E}{\sqrt{n}}$ where 
 
 ### Target Centering Error
 
-Target centering error is the angular effect of the backsight and foresight targets not being exactly over their stations.
+Target centering error $E_{a_t}$ is the angular effect of the backsight and foresight targets not being exactly over their stations.
 For backsight distance $D_1$ and foresight distance $D_2$ it is computed as
 
 $$E_{a_t} = E_t \left(\frac{\sqrt{D_1^2+D_2^2}}{D_1 \cdot D_2}\right)$$
@@ -862,10 +1033,10 @@ componentPlot(focus, "E", Math.min(width, 640))
 
 ## Error in Position
 
-Finally, the latitude and departure errors are combined by root sum of squares to give the error in position, $E_p$,
+Finally, the latitude and departure errors are combined by root sum of squares to give the error in position, $E_{\text{Pos}}$,
 of the station at the end of each leg relative to the station at the start of the leg:
 
-$$E_P = \sqrt{E_{\text{Lat}}^2 + E_{\text{Dep}}^2}$$
+$$E_{\text{Pos}} = \sqrt{E_{\text{Lat}}^2 + E_{\text{Dep}}^2}$$
 
 ```{ojs}
 //| echo: false
@@ -873,15 +1044,18 @@ texTable(lineErrs, [
   {head: "!Line", cell: e => `${e.from} → ${e.to}`},
   {head: "E_{\\text{Lat}}", cell: e => e.Elat.toFixed(5)},
   {head: "E_{\\text{Dep}}", cell: e => e.Edep.toFixed(5)},
-  {head: "E_P", cell: e => e.Epos.toFixed(5), total: true}
+  {head: "E_{\\text{Pos}}", cell: e => e.Epos.toFixed(5), total: true}
 ])
 ```
 
-Plotting the latitude and departure errors together shows where the end station could plausibly be.
-The angular error moves it across the line and the distance error moves it along the line, so the region is an ellipse aligned with the line,
+Plotting the latitude and departure errors together gives the end station's 1σ error ellipse.
+The angular error moves it across the line and the distance error moves it along the line, so the ellipse is aligned with the line,
 with semi-axes $E_d$ and $D \cdot E_a$. $E_{\text{Lat}}$ and $E_{\text{Dep}}$ are how far that ellipse extends north–south and east–west,
-so it just fits the box they make, and $E_P$ is the half-diagonal of that box.
-The ellipse's largest radius is shorter than $E_P$ unless the line runs exactly north–south or east–west.
+so it just fits the box they make, and $E_{\text{Pos}}$ is the half-diagonal of that box.
+
+By playing with the instrument's distance and angular error specifications above, the shape of this ellipse can
+be changed. A very large angular error relative to distance error makes a short, wide ellipse while the opposite
+will produce a long, skinny ellipse, with respect to the line.
 
 ```{ojs}
 //| echo: false
