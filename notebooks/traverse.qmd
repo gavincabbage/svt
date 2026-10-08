@@ -82,7 +82,7 @@ Each sample also sets the instrument specifications below.
 With azimuths locked, only the first line's azimuth is entered and the rest are carried from it by the angles.
 Unlock them to enter every azimuth, as the samples do; each station then shows how far its azimuth disagrees with its angle.
 
-Subsequent azimuths, station positions, and closure update as you type.
+Station positions and closure update as you type, along with the computed azimuths when locked or each station's azimuth check when unlocked.
 
 ```{ojs}
 //| echo: false
@@ -319,7 +319,7 @@ function componentPlot(e, axis, w) {
 // Position error: the ellipse with semi-axes E_d along the line and D·E_a across it, its E_Dep × E_Lat
 // bounding box, and E_Pos as the box's half-diagonal.
 function ellipsePlot(e, w) {
-  const caption = html`<span>Line ${e.from} → ${e.to}: the error ellipse has semi-axes \\(E_d\\) along the line and \\(D \\cdot E_a\\) across it.
+  const caption = html`<span>Line ${e.from} → ${e.to}: the error ellipse has semi-axes \\(E_d\\) along the line and \\(D \\cdot E_a\\) across it (with \\(E_a\\) in radians).
     It just fits the \\(\\pm E_{\\text{Dep}} \\times \\pm E_{\\text{Lat}}\\) box, and \\(E_{\\text{Pos}}\\) is the box's half-diagonal.</span>`;
   return zoomPlot(e, w, caption, g => {
     const ellipse = Array.from({length: 121}, (_, i) => {
@@ -436,7 +436,7 @@ function numberInput(obj, key, onChange, {min = 0, max, positive = false, intege
 
 ```{ojs}
 //| echo: false
-// Traverse editor: its value is {startAz, rows}. Typing updates the value without
+// Traverse editor: its value is {startAz, rows, lockAzimuths}. Typing updates the value without
 // rebuilding the table (so focus is kept); adding, removing, or resetting rebuilds it.
 
 function traverseEditor(initial) {
@@ -856,13 +856,13 @@ focus = lineErrs[focusLine]
 
 From the equation for EDM distance error [@ghilani2022, eq. 6.15],
 
-$$E_d = \sqrt{E_i^2 + E_t^2 + E_c^2 + (ppm \cdot D)^2}$$
+$$E_d = \sqrt{E_i^2 + E_t^2 + E_c^2 + (\text{ppm} \cdot D)^2}$$
 
 where $E_i$ is the instrument centering error,
 $E_t$ is the target centering error,
-$E_c$ the instrument constant error,
-$ppm$ the specified scalar error for the EDM and
-$D$ the measured distance,
+$E_c$ is the EDM constant error,
+$\text{ppm}$ is the specified scalar error for the EDM, and
+$D$ is the measured distance,
 the foresight distance error $E_d$ for each leg of the traverse is computed as
 
 ```{ojs}
@@ -873,7 +873,7 @@ texTable(distErrors, [
   {head: "E_i", cell: e => e.Ei.toFixed(5)},
   {head: "E_t", cell: e => e.Et.toFixed(5)},
   {head: "E_c", cell: e => e.Ec.toFixed(5)},
-  {head: "ppm \\times D", cell: e => e.scale.toFixed(5)},
+  {head: "\\text{ppm} \\cdot D", cell: e => e.scale.toFixed(5)},
   {head: "E_d", cell: e => e.Ed.toFixed(5), total: true}
 ])
 ```
@@ -882,13 +882,13 @@ texTable(distErrors, [
 
 The foresight azimuth or angular error $E_a$ is the combination of instrument reading and pointing error as well
 as the angular effect of the instrument and target centering errors.
-We combine them using the root sum of squares, using the form of equation 3.11 [@ghilani2022] since all four errors have different magnitudes.
+We combine them using the root sum of squares, in the form of equation 3.11 [@ghilani2022] since all four errors have different magnitudes.
 Then,
 
 $$E_a = \sqrt{E_r^2 + E_p^2 + E_{a_i}^2 + E_{a_t}^2}$$
 
-where $E_r$  and $E_p$ are the reading and pointing error, respectively, adjusted by the number of direct and reversed readings,
-and $E_{a_i}$ and $E_{a_t}$ are the angular effects of the instrument and target errors, respectively.
+where $E_r$ and $E_p$ are the reading and pointing error, respectively, adjusted by the number of direct and reversed readings,
+and $E_{a_i}$ and $E_{a_t}$ are the angular effects of the instrument and target centering errors, respectively.
 
 ### Reading & Pointing Error
 
@@ -928,7 +928,7 @@ For backsight distance $D_1$ and foresight distance $D_2$ it is computed as
 
 $$E_{a_t} = E_t \left(\frac{\sqrt{D_1^2+D_2^2}}{D_1 \cdot D_2}\right)$$
 
-where $E_t$ is the target centering error. The result is in radians, so multiply by the number of seconds in a radian (206,265″), $\rho$, to give seconds.
+where $E_t$ is the target centering error. The result is in radians, so multiply by $\rho \approx 206{,}265$″ per radian to give seconds.
 For the angle at the first station of each leg, the target centering error is
 
 ```{ojs}
@@ -952,7 +952,7 @@ computed by the law of cosines
 
 $$D_3 = \sqrt{D_1^2 + D_2^2 - 2 D_1 D_2 \cos\alpha}$$
 
-As above, the result is multiplied by $\rho$ to give seconds. For the angle at the first station of each leg, the instrument centering error is
+where $\alpha$ is the angle at the instrument station. As above, the result is multiplied by $\rho$ to give seconds. For the angle at the first station of each leg, the instrument centering error is
 
 ```{ojs}
 //| echo: false
@@ -1008,7 +1008,7 @@ componentPlot(focus, "N", Math.min(width, 640))
 
 ### Error in Departure
 
-Likewise for each leg's departure $D \sin Az$
+Likewise for each leg's departure $D \sin Az$:
 
 $$E_{\text{Dep}_a} = D \sin Az - D \sin(Az + E_a)$$
 
@@ -1050,7 +1050,7 @@ texTable(lineErrs, [
 
 Plotting the latitude and departure errors together gives the end station's 1σ error ellipse.
 The angular error moves it across the line and the distance error moves it along the line, so the ellipse is aligned with the line,
-with semi-axes $E_d$ and $D \cdot E_a$. $E_{\text{Lat}}$ and $E_{\text{Dep}}$ are how far that ellipse extends north–south and east–west,
+with semi-axes $E_d$ and $D \cdot E_a$ (with $E_a$ in radians). $E_{\text{Lat}}$ and $E_{\text{Dep}}$ are how far that ellipse extends north–south and east–west,
 so it just fits the box they make, and $E_{\text{Pos}}$ is the half-diagonal of that box.
 
 By playing with the instrument's distance and angular error specifications above, the shape of this ellipse can
